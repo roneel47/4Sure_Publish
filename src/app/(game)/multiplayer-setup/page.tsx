@@ -6,7 +6,7 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
 import { Input } from '@/components/ui/input';
-import { Users, UserPlus, LogIn, ArrowLeft, Gamepad2, Server, CheckCircle } from 'lucide-react';
+import { Users, UserPlus, LogIn, ArrowLeft, Gamepad2, Server, CheckCircle, User, ArrowRight } from 'lucide-react'; // Added User and ArrowRight
 import { useRouter } from 'next/navigation';
 
 type MultiplayerStep = "playerCount" | "hostJoin" | "lobby";
