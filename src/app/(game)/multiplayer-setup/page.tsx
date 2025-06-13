@@ -6,17 +6,19 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
 import { Input } from '@/components/ui/input';
-import { Users, UserPlus, LogIn, ArrowLeft, Gamepad2, Server, CheckCircle, User, ArrowRight } from 'lucide-react'; // Added User and ArrowRight
+import { Users, UserPlus, LogIn, ArrowLeft, Gamepad2, Server, CheckCircle, User, ArrowRight } from 'lucide-react';
 import { useRouter } from 'next/navigation';
+import { useToast } from '@/hooks/use-toast';
 
-type MultiplayerStep = "playerCount" | "hostJoin" | "lobby";
+type MultiplayerStep = "playerCount" | "hostJoin";
 type PlayerCount = "duo" | "trio" | "quads" | null;
 type HostJoin = "host" | "join" | null;
 
 export default function MultiplayerSetupPage() {
   const router = useRouter();
+  const { toast } = useToast();
   const [step, setStep] = useState<MultiplayerStep>("playerCount");
-  const [playerCount, setPlayerCount] = useState<PlayerCount>(null);
+  const [playerCount, setPlayerCount] = useState<PlayerCount>("duo"); // Default to duo for smoother testing
   const [hostJoin, setHostJoin] = useState<HostJoin>(null);
   const [gameId, setGameId] = useState<string>("");
   const [generatedGameId, setGeneratedGameId] = useState<string | null>(null);
@@ -28,10 +30,11 @@ export default function MultiplayerSetupPage() {
   const handleHostJoinSelect = (value: string) => {
     setHostJoin(value as HostJoin);
     if (value === "host") {
-      // In a real app, you'd call a backend to create a game and get an ID
-      setGeneratedGameId(`GAME${Math.floor(1000 + Math.random() * 9000)}`);
+      const newGameId = `GAME${Math.floor(1000 + Math.random() * 9000)}`;
+      setGeneratedGameId(newGameId);
+      setGameId(newGameId); // Also set gameId for consistency if they switch back and forth
     } else {
-      setGeneratedGameId(null);
+      setGeneratedGameId(null); // Clear generated if switching to join
     }
   };
 
@@ -39,11 +42,16 @@ export default function MultiplayerSetupPage() {
     if (step === "playerCount" && playerCount) {
       setStep("hostJoin");
     } else if (step === "hostJoin" && hostJoin) {
-      // For now, we'll just show a placeholder for the lobby
-      // In a real app, this would navigate to a lobby page or game page
-      // after backend interaction.
-       alert(`Proceeding to ${hostJoin === 'host' ? 'host lobby (ID: ' + generatedGameId + ')' : 'join game with ID: ' + gameId}. Backend integration needed.`);
-       // setStep("lobby"); // Or navigate to a lobby page
+      const finalGameId = hostJoin === 'host' ? generatedGameId : gameId;
+      if (finalGameId && playerCount) {
+        router.push(`/multiplayer-secret-setup?gameId=${finalGameId.toUpperCase()}&playerCount=${playerCount}`);
+      } else {
+        toast({
+          title: "Setup Incomplete",
+          description: "Please ensure a game ID is entered or generated, and player count is selected.",
+          variant: "destructive",
+        });
+      }
     }
   };
 
@@ -52,7 +60,7 @@ export default function MultiplayerSetupPage() {
       setStep("playerCount");
       setHostJoin(null);
       setGeneratedGameId(null);
-      setGameId("");
+      setGameId(""); // Reset gameId when going back to player count selection
     } else if (step === "playerCount") {
       router.push('/mode-select');
     }
@@ -100,8 +108,8 @@ export default function MultiplayerSetupPage() {
             >
               {[
                 { value: "duo", label: "Duo (2 Players)", icon: <User className="mr-2 h-5 w-5"/> },
-                { value: "trio", label: "Trio (3 Players)", icon: <Users className="mr-2 h-5 w-5"/> },
-                { value: "quads", label: "Quads (4 Players)", icon: <Gamepad2 className="mr-2 h-5 w-5"/> },
+                // { value: "trio", label: "Trio (3 Players)", icon: <Users className="mr-2 h-5 w-5"/> },
+                // { value: "quads", label: "Quads (4 Players)", icon: <Gamepad2 className="mr-2 h-5 w-5"/> },
               ].map((option) => (
                 <Label
                   key={option.value}
@@ -115,6 +123,7 @@ export default function MultiplayerSetupPage() {
                   <span className="font-semibold text-base">{option.label}</span>
                 </Label>
               ))}
+                <p className="text-xs text-center text-muted-foreground">Trio & Quads modes coming soon!</p>
             </RadioGroup>
           )}
 
@@ -161,7 +170,10 @@ export default function MultiplayerSetupPage() {
             <Card className="bg-muted/50 p-4 text-center">
               <CardDescription>Share this Game ID with others:</CardDescription>
               <CardTitle className="text-2xl text-primary font-mono tracking-widest py-2">{generatedGameId}</CardTitle>
-              <Button variant="outline" size="sm" onClick={() => navigator.clipboard.writeText(generatedGameId)}>Copy ID</Button>
+              <Button variant="outline" size="sm" onClick={() => {
+                  navigator.clipboard.writeText(generatedGameId);
+                  toast({title: "Copied!", description: "Game ID copied to clipboard."})
+                }}>Copy ID</Button>
             </Card>
           )}
 
@@ -175,7 +187,7 @@ export default function MultiplayerSetupPage() {
             </Button>
           ) : (
              <Button className="w-full" size="lg" disabled>
-              {step === "playerCount" ? "Select Player Count" : "Choose an Option"}
+              {step === "playerCount" ? "Select Player Count" : (hostJoin === 'join' ? "Enter Game ID" : "Choose an Option")}
             </Button>
           )}
            <Button variant="link" onClick={() => router.push('/mode-select')} className="text-sm">
@@ -183,9 +195,7 @@ export default function MultiplayerSetupPage() {
           </Button>
         </CardFooter>
       </Card>
-      <p className="text-center text-xs text-muted-foreground mt-8 max-w-md">
-        Multiplayer mode is currently a UI prototype. Backend integration (e.g., with MongoDB and WebSockets) is required for full functionality like hosting, joining, and real-time gameplay across different devices.
-      </p>
     </div>
   );
 }
+
