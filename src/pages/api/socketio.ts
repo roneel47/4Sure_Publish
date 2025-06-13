@@ -44,13 +44,18 @@ export default function handler(
           socket.emit('joined-room', gameId);
         });
 
-        // Placeholder for future events like 'send-secret', 'make-guess', etc.
-        // Example:
-        // socket.on('send-secret', (data: { gameId: string; playerId: string; secret: string[] }) => {
-        //   console.log('Secret received on server:', data);
-        //   // Broadcast to others in the room, or store it, etc.
-        //   io.to(data.gameId).emit('secret-update', { playerId: data.playerId, secretSet: true });
-        // });
+        // Handle receiving a secret from a player
+        socket.on('send-secret', (data: { gameId: string; playerId: string; secret: string[] }) => {
+          console.log(`Secret received on server from ${data.playerId} for game ${data.gameId}:`, data.secret);
+          // For now, we're not storing it persistently on the server in this step.
+          // We just broadcast that this player has set their secret.
+          // In a real app, you'd store this (e.g., in-memory store per room, or DB).
+          io.to(data.gameId).emit('secret-update', { playerId: data.playerId, secretSet: true });
+          // Potentially, add logic here to check if all players in data.gameId have submitted secrets
+          // and then emit an 'all-secrets-ready' or 'start-game' event.
+        });
+
+        // Placeholder for future events like 'make-guess', etc.
       });
     }
     res.status(200).json({ message: 'Socket.IO server initialized or already running.' });
@@ -68,3 +73,4 @@ export default function handler(
 //     bodyParser: false,
 //   },
 // };
+
