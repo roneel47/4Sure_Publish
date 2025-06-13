@@ -5,7 +5,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import type { GameRoom, PlayerData, Guess, MultiplayerGameStatus } from '@/types/game';
 import { calculateFeedback, checkWin } from '@/lib/gameLogic';
-import { MongoClient, Db as MongoDb, FindOneAndUpdateOptions } from 'mongodb';
+import { MongoClient, Db as MongoDb, UpdateOptions } from 'mongodb';
 
 interface NextApiResponseWithSocket extends NextApiResponse {
   socket: NetSocket & {
@@ -21,6 +21,8 @@ interface CustomSocket extends Socket {
 }
 
 const MONGODB_URI = process.env.MONGODB_URI;
+const DATABASE_NAME = "4sureDB";
+const COLLECTION_NAME = "gameRooms";
 let db: MongoDb | null = null;
 
 // Initialize MongoDB connection
@@ -30,23 +32,23 @@ let db: MongoDb | null = null;
     return;
   }
   try {
-    const client = new MongoClient(MONGODB_URI);
     console.log("Attempting to connect to MongoDB...");
+    const client = new MongoClient(MONGODB_URI);
     await client.connect();
     console.log("Successfully connected to MongoDB.");
     
-    const databaseName = "4sureDB"; 
-    db = client.db(databaseName);
-    console.log(`MongoDB: Targeting database: '${databaseName}'.`);
+    db = client.db(DATABASE_NAME);
+    console.log(`MongoDB: Targeting database: '${DATABASE_NAME}'.`);
 
-    const gameRoomsCollection = db.collection<GameRoom>('gameRooms');
-    console.log(`MongoDB: Targeting collection: 'gameRooms' in database '${databaseName}'.`);
-    await gameRoomsCollection.createIndex({ gameId: 1 }, { unique: true });
-    console.log(`MongoDB: Ensured unique index on 'gameId' in 'gameRooms' collection in '${databaseName}'. DB setup complete.`);
+    // Ensure the collection exists (MongoDB creates it on first write if not present)
+    // and log that we are targeting it.
+    // const gameRoomsCollection = db.collection<GameRoom>(COLLECTION_NAME);
+    console.log(`MongoDB: Targeting collection: '${COLLECTION_NAME}' in database '${DATABASE_NAME}'. DB setup complete.`);
+    // Manual index creation is recommended: db.gameRooms.createIndex( { "gameId": 1 }, { unique: true } )
 
   } catch (error) {
-    console.error("Error connecting to MongoDB or ensuring index:", error);
-    db = null; // Ensure db is null if connection fails
+    console.error("Error connecting to MongoDB:", error);
+    db = null;
   }
 })();
 
@@ -60,11 +62,11 @@ const getPlayerCountNumber = (playerCountString: string): number => {
 
 async function getGameRoom(gameId: string): Promise<GameRoom | null> {
   if (!db) {
-    console.warn(`MongoDB: db instance not available. Cannot getGameRoom for ${gameId}.`);
+    console.warn(`MongoDB: db instance not available (getGameRoom for ${gameId}).`);
     return null;
   }
   try {
-    const roomDocument = await db.collection<GameRoom>('gameRooms').findOne({ gameId: gameId });
+    const roomDocument = await db.collection<GameRoom>(COLLECTION_NAME).findOne({ gameId: gameId });
     if (roomDocument) {
         const { _id, ...data } = roomDocument as any; 
         return data as GameRoom;
@@ -79,79 +81,70 @@ async function getGameRoom(gameId: string): Promise<GameRoom | null> {
 
 async function updateGameRoom(gameId: string, operationData: Partial<GameRoom> | any): Promise<GameRoom | null> {
   if (!db) {
-    console.warn(`MongoDB: db instance not available. Cannot updateGameRoom for ${gameId}.`);
+    console.warn(`MongoDB: db instance not available (updateGameRoom for ${gameId}).`);
     return null;
   }
   
   const filter = { gameId: gameId };
   let mongoUpdateOps: any = {};
 
-  try {
-    const defaultsOnInsert: Partial<GameRoom> = {
-      gameId: gameId, 
-      playerCount: (operationData as GameRoom).playerCount !== undefined ? (operationData as GameRoom).playerCount : 0,
-      players: {},
-      status: 'WAITING_FOR_PLAYERS',
-      secretsSetCount: 0,
-      targetMap: {},
-    };
-    
-    mongoUpdateOps.$setOnInsert = defaultsOnInsert;
+  // Default structure for a new room on insert
+  const defaultsOnInsert: Partial<GameRoom> = {
+    gameId: gameId, 
+    playerCount: (operationData as GameRoom).playerCount !== undefined ? (operationData as GameRoom).playerCount : 0,
+    players: {},
+    status: 'WAITING_FOR_PLAYERS',
+    secretsSetCount: 0,
+    targetMap: {},
+    turn: undefined, // Explicitly undefined initially
+    winner: undefined, // Explicitly undefined initially
+  };
 
-    if (Object.keys(operationData).some(key => key.startsWith('$'))) {
-      for (const opKey in operationData) {
-        if (opKey === '$setOnInsert') {
-          mongoUpdateOps.$setOnInsert = { ...mongoUpdateOps.$setOnInsert, ...operationData.$setOnInsert };
-        } else if (opKey === '$set') {
-          const { gameId: _, ...setFieldsFromOp } = operationData.$set; 
-          if (Object.keys(setFieldsFromOp).length > 0) {
-            mongoUpdateOps.$set = { ...(mongoUpdateOps.$set || {}), ...setFieldsFromOp };
-          }
-        } else {
-          mongoUpdateOps[opKey] = { ...(mongoUpdateOps[opKey] || {}), ...operationData[opKey] };
-        }
-      }
-    } else {
-      const { gameId: _gameId, ...fieldsToSet } = operationData; 
-      if (Object.keys(fieldsToSet).length > 0) {
-        mongoUpdateOps.$set = { ...(mongoUpdateOps.$set || {}), ...fieldsToSet };
-      }
-      mongoUpdateOps.$setOnInsert = { ...mongoUpdateOps.$setOnInsert, ...operationData };
-      mongoUpdateOps.$setOnInsert.gameId = gameId; 
+  if (Object.keys(operationData).some(key => key.startsWith('$'))) { // If operationData contains MongoDB operators
+    mongoUpdateOps = {...operationData}; // Use operators as is
+    // Ensure $setOnInsert is comprehensive for new documents
+    mongoUpdateOps.$setOnInsert = { ...defaultsOnInsert, ...(mongoUpdateOps.$setOnInsert || {}) };
+    // Remove gameId from $set to avoid conflict if it's there
+    if (mongoUpdateOps.$set && mongoUpdateOps.$set.gameId) {
+      delete mongoUpdateOps.$set.gameId;
     }
-
-    if (mongoUpdateOps.$set && Object.keys(mongoUpdateOps.$set).length === 0) {
+  } else { // If operationData is a plain object of fields to set
+    const { gameId: opGameId, ...fieldsToSet } = operationData; // Exclude gameId from $set
+    
+    mongoUpdateOps.$set = fieldsToSet;
+    mongoUpdateOps.$setOnInsert = { ...defaultsOnInsert, ...operationData }; // Merge all fields for insert
+  }
+  
+  // Ensure gameId is part of $setOnInsert but not $set (unless $set is the only operation, which is rare for upserts)
+  mongoUpdateOps.$setOnInsert.gameId = gameId;
+  if (mongoUpdateOps.$set && Object.keys(mongoUpdateOps.$set).length === 0) {
       delete mongoUpdateOps.$set;
-    }
+  }
 
-    const options: FindOneAndUpdateOptions = { upsert: true, returnDocument: 'after' };
+
+  try {
+    const options: UpdateOptions = { upsert: true };
     
-    const result = await db.collection<GameRoom>('gameRooms').findOneAndUpdate(
+    const result = await db.collection<GameRoom>(COLLECTION_NAME).updateOne(
       filter,
       mongoUpdateOps,
       options
     );
     
-    if (result) {
-      const { _id, ...data } = result as any;
-      return data as GameRoom;
+    console.log(`MongoDB: UpdateOne operation for game room ${gameId}. Matched: ${result.matchedCount}, Modified: ${result.modifiedCount}, UpsertedId: ${result.upsertedId}`);
+
+    if (result.acknowledged) {
+      // After update/upsert, fetch the potentially modified/created document to return its state
+      return await getGameRoom(gameId);
     }
     
-    console.warn(`MongoDB: findOneAndUpdate for game ${gameId} returned null. Filter: ${JSON.stringify(filter)}, Operation: ${JSON.stringify(mongoUpdateOps)}. Attempting direct find.`);
-    const existingRoom = await db.collection<GameRoom>('gameRooms').findOne(filter);
-    if (existingRoom) {
-        console.log(`MongoDB: Room ${gameId} found after null from findOneAndUpdate. Returning found room.`);
-        const { _id, ...data } = existingRoom as any;
-        return data as GameRoom;
-    }
-    console.warn(`MongoDB: Room ${gameId} still not found after null from findOneAndUpdate. Upsert may have failed.`);
+    console.warn(`MongoDB: updateOne for game ${gameId} was not acknowledged or failed. Result:`, result);
     return null;
 
   } catch (error: any) {
-    console.error(`MongoDB: Error updating/upserting game room ${gameId}:`, error);
-    if (error.code === 40 || error.message?.includes("conflict at 'gameId'")) {
-        console.error("Filter that might have caused 'gameId' conflict:", JSON.stringify(filter, null, 2));
-        console.error("Update document that might have caused 'gameId' conflict:", JSON.stringify(mongoUpdateOps, null, 2));
+    console.error(`MongoDB: Error in updateGameRoom for ${gameId}. Filter: ${JSON.stringify(filter)}, Operation: ${JSON.stringify(mongoUpdateOps)}`, error);
+    if (error.code === 11000 || error.code === 40) { // 11000 is duplicate key, 40 can be gameId conflict
+        console.error("Conflict error likely due to 'gameId' unique index or field update. Check filter and operationData:", {filter, mongoUpdateOps});
     }
     return null;
   }
@@ -168,7 +161,7 @@ export default function handler(
     } else {
       console.log('Initializing Socket.IO server...');
       const io = new SocketIOServer(res.socket.server, {
-        path: '/api/socketio_c',
+        path: '/api/socketio_c', // Ensure this path is matched by client
         addTrailingSlash: false,
       });
       res.socket.server.io = io;
@@ -185,27 +178,30 @@ export default function handler(
             try {
               let room = await getGameRoom(gameId);
               if (room && room.players[playerId]) {
+                // Basic notification for now. More complex logic could be added here.
                 io.to(gameId).emit('player-disconnected', { 
                   gameId, 
                   playerId,
                   message: `${playerId} has disconnected.` 
                 });
                 
+                // Simplified handling: if a player in a 2-player in-progress game disconnects, the other wins.
                 if (room.playerCount === 2 && room.status === 'IN_PROGRESS') {
-                    const remainingPlayerIds = Object.keys(room.players).filter(pId => pId !== playerId && room!.players[pId].socketId !== socket.id); // Check socketID too in case of quick reconnect
+                    const remainingPlayerIds = Object.keys(room.players).filter(pId => pId !== playerId && room!.players[pId].socketId !== socket.id);
                     if (remainingPlayerIds.length === 1) {
                         const winnerId = remainingPlayerIds[0];
-                        if (room.players[winnerId]) {
+                        if (room.players[winnerId]) { // Check if winner still exists in room data
                              const gameOverUpdate = { status: 'GAME_OVER' as MultiplayerGameStatus, winner: winnerId, turn: undefined };
                              const updatedRoom = await updateGameRoom(gameId, { $set: gameOverUpdate });
                              if (updatedRoom) {
                                  io.to(gameId).emit('game-over', { gameId, winner: winnerId });
-                                 io.to(gameId).emit('game-state-update', updatedRoom);
+                                 io.to(gameId).emit('game-state-update', updatedRoom); // Send final state
                              }
                         }
                     }
                 } else if (room.status !== 'GAME_OVER') { 
-                    const currentRoomState = await getGameRoom(gameId);
+                    // For other cases or if you don't want to auto-end, just send an update
+                    const currentRoomState = await getGameRoom(gameId); // Re-fetch
                     if (currentRoomState) io.to(gameId).emit('game-state-update', currentRoomState);
                 }
               }
@@ -234,7 +230,7 @@ export default function handler(
           let room = await getGameRoom(gameId);
           let assignedPlayerId: string | undefined = rejoiningPlayerId;
           
-          const playerObjectBase: PlayerData = { socketId: socket.id, guessesMade: [], guessesAgainst: [] };
+          const playerObjectBase: PlayerData = { socketId: socket.id, guessesMade: [], guessesAgainst: [], secret: [] };
 
           if (!room) { 
             console.log(`Game room ${gameId} not found in DB. Creating for ${numPlayerCount} players.`);
@@ -242,11 +238,10 @@ export default function handler(
             const initialPlayers: { [playerId: string]: PlayerData } = {};
             initialPlayers[assignedPlayerId] = playerObjectBase;
 
-            const newRoomData: GameRoom = {
-              gameId, 
+            const newRoomData: Partial<GameRoom> = { // Using Partial as gameId will be in filter for updateGameRoom
               playerCount: numPlayerCount,
               players: initialPlayers,
-              status: 'WAITING_FOR_PLAYERS',
+              status: 'WAITING_FOR_PLAYERS', // Default status for a new room
               secretsSetCount: 0,
               targetMap: {},
             };
@@ -287,18 +282,18 @@ export default function handler(
                 return;
             }
             
-            const playerUpdatePayload: any = {};
-            // Use $set to create/update the player object. If player exists, only socketId is updated.
-            // If player doesn't exist, the whole playerObjectBase is set.
-            playerUpdatePayload.$set = { 
-                [`players.${assignedPlayerId}`]: { 
-                    ...(room.players[assignedPlayerId] || playerObjectBase), // retain existing data if player rejoining
-                    socketId: socket.id // always update socketId
+            // Prepare payload for updating an existing room with a new or rejoining player
+            const playerUpdatePayload: any = {
+              $set: {
+                [`players.${assignedPlayerId}`]: {
+                  ...(room.players[assignedPlayerId] || playerObjectBase), // Retain existing data if player rejoining
+                  socketId: socket.id // Always update socketId
                 }
+              }
             };
-            // If it's a new player being added to an existing room, ensure their basic structure is set
+            // If player wasn't in room.players at all, make sure their base structure is set
             if (!room.players[assignedPlayerId]) {
-                playerUpdatePayload.$set[`players.${assignedPlayerId}`] = playerObjectBase;
+                 playerUpdatePayload.$set[`players.${assignedPlayerId}`] = playerObjectBase;
             }
 
 
@@ -312,6 +307,7 @@ export default function handler(
             room = updatedRoomAfterPlayerJoin;
           }
           
+          // Ensure context is set on the socket
           socket.gameId = gameId;
           socket.playerId = assignedPlayerId;
           
@@ -341,10 +337,8 @@ export default function handler(
 
         socket.on('send-secret', async (data: { gameId: string; playerId: string; secret: string[] }) => {
           const { gameId, playerId, secret } = data;
-          if (!db) {
-            socket.emit('error-event', { message: 'Database not connected.' });
-            return;
-          }
+          if (!db) { socket.emit('error-event', { message: 'Database not connected.' }); return; }
+          
           let room = await getGameRoom(gameId);
 
           if (!room || !room.players[playerId] || (room.status !== 'ALL_PLAYERS_JOINED' && room.status !== 'SETTING_SECRETS')) {
@@ -352,22 +346,22 @@ export default function handler(
             return;
           }
           
+          // Prevent setting secret if already set (idempotency)
           if (room.players[playerId].secret && room.players[playerId].secret!.length > 0) {
              console.log(`Player ${playerId} trying to set secret again for ${gameId}. Already set.`);
              io.to(gameId).emit('game-state-update', room); 
              return;
           }
           
-           const setSecretUpdate: any = {
+          const setSecretUpdate: any = {
                 $set: {
                     [`players.${playerId}.secret`]: secret,
-                    status: 'SETTING_SECRETS' 
+                    status: 'SETTING_SECRETS' // Transition to this status when first secret is being set
                 },
                 $inc: { secretsSetCount: 1 }
             };
             
-            const roomAfterSecretAttempt = await updateGameRoom(gameId, setSecretUpdate);
-
+          const roomAfterSecretAttempt = await updateGameRoom(gameId, setSecretUpdate);
 
           if (!roomAfterSecretAttempt) {
              console.warn(`Failed to set secret for ${playerId} in ${gameId}. Re-fetching current state.`);
@@ -388,9 +382,9 @@ export default function handler(
           console.log(`Secret from ${playerId} for ${gameId}. Total set: ${room.secretsSetCount}/${room.playerCount}`);
           
           io.to(gameId).emit('secret-update', { playerId, secretSet: true, secretsCurrentlySet: room.secretsSetCount, totalPlayers: room.playerCount });
-          io.to(gameId).emit('game-state-update', room);
+          io.to(gameId).emit('game-state-update', room); // Send updated state after secret set
 
-          if (room.secretsSetCount === room.playerCount && (room.status === 'ALL_PLAYERS_JOINED' || room.status === 'SETTING_SECRETS')) {
+          if (room.secretsSetCount === room.playerCount && (room.status === 'SETTING_SECRETS')) { // Check status SETTING_SECRETS
             console.log(`All secrets set for game ${gameId}. Starting game.`);
             
             const playerIds = Object.keys(room.players).sort(); 
@@ -398,6 +392,7 @@ export default function handler(
             if (room.playerCount === 2) { 
                targetMap = { [playerIds[0]]: playerIds[1], [playerIds[1]]: playerIds[0] };
             } 
+            // TODO: Add targetMap logic for Trio/Quads if implementing
             
             const startingTurn = playerIds[Math.floor(Math.random() * playerIds.length)];
             
@@ -418,16 +413,14 @@ export default function handler(
             room = gameStartedRoom;
 
             io.to(gameId).emit('game-start', { gameId, startingPlayer: room.turn!, targetMap: room.targetMap! });
-            io.to(gameId).emit('game-state-update', room);
+            io.to(gameId).emit('game-state-update', room); // Send final state with game started
           }
         });
         
         socket.on('make-guess', async (data: { gameId: string; playerId: string; guess: string[] }) => {
           const { gameId, playerId, guess: guessArray } = data;
-          if (!db) {
-            socket.emit('error-event', { message: 'Database not connected.' });
-            return;
-          }
+          if (!db) { socket.emit('error-event', { message: 'Database not connected.' }); return; }
+          
           let room = await getGameRoom(gameId);
 
           if (!room || room.status !== 'IN_PROGRESS') {
@@ -438,8 +431,8 @@ export default function handler(
           }
           
           const targetPlayerId = room.targetMap?.[playerId];
-          if (!targetPlayerId || !room.players[targetPlayerId]?.secret) {
-            socket.emit('error-event', { message: 'Target player or their secret not found.' }); return;
+          if (!targetPlayerId || !room.players[targetPlayerId]?.secret || room.players[targetPlayerId].secret?.length === 0) {
+            socket.emit('error-event', { message: 'Target player or their secret not found or not set.' }); return;
           }
 
           const targetSecret = room.players[targetPlayerId]!.secret!;
@@ -451,6 +444,7 @@ export default function handler(
           const updateFields: any = {
             $push: {
               [`players.${playerId}.guessesMade`]: guessObject,
+              [`players.${targetPlayerId}.guessesAgainst`]: guessObject, // Also record on target
             }
           };
           
@@ -474,12 +468,15 @@ export default function handler(
           }
           room = updatedRoomAfterGuess;
           
+          // Emit guess feedback BEFORE game over or turn update for clarity on client
+          io.to(gameId).emit('guess-feedback', { gameId, guessingPlayerId: playerId, targetPlayerId, guess: guessObject });
+
           if (room.status === 'GAME_OVER') {
             io.to(gameId).emit('game-over', { gameId, winner: room.winner! });
           } else {
             io.to(gameId).emit('turn-update', { gameId, nextPlayerId: room.turn! });
           }
-          io.to(gameId).emit('game-state-update', room); 
+          io.to(gameId).emit('game-state-update', room); // Send comprehensive state update
         });
       });
     }
@@ -489,6 +486,4 @@ export default function handler(
     res.status(405).end(`Method ${req.method} Not Allowed`);
   }
 }
-    
-
     

@@ -9,19 +9,27 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import PlayerPanel from '@/components/game/PlayerPanel';
 import TurnIndicator from '@/components/game/TurnIndicator';
 import { Button } from '@/components/ui/button';
-import type { Guess, PlayerData, GameRoom as ServerGameRoom } from '@/types/game';
+import type { Guess, PlayerData as ServerPlayerData, GameRoom as ServerGameRoom } from '@/types/game'; // Renamed PlayerData to ServerPlayerData
 import { CODE_LENGTH } from '@/lib/gameLogic';
 import { Award, Hourglass, Loader2 } from 'lucide-react';
 
-// Extended local state for the multiplayer game board
+// Local PlayerData might have slightly different needs or be a subset
+interface ClientPlayerData extends Partial<ServerPlayerData> {
+  displayName: string; 
+  // Explicitly define guessesMade and guessesAgainst as potentially undefined or arrays
+  guessesMade?: Guess[];
+  guessesAgainst?: Guess[];
+}
+
+
 interface MultiplayerGameState {
   myPlayerId: string | null;
-  mySecret: string[]; // Player's own secret
+  mySecret: string[]; 
   currentTurnPlayerId: string | null;
-  playersData: { [playerId: string]: Partial<PlayerData> & { displayName: string } };
+  playersData: { [playerId: string]: ClientPlayerData }; // Use ClientPlayerData
   gameStatus: 'LOADING' | 'WAITING_FOR_GAME_START' | 'IN_PROGRESS' | 'GAME_OVER';
   winner: string | null;
-  targetMap: { [playerId: string]: string } | null; // Who guesses whom
+  targetMap: { [playerId: string]: string } | null; 
 }
 
 export default function MultiplayerPlayPage() {
@@ -51,29 +59,36 @@ export default function MultiplayerPlayPage() {
       return;
     }
 
+    // Retrieve playerId and associated gameId from localStorage
     const storedPlayerId = localStorage.getItem('myPlayerId_activeGame');
-    const mySecretFromStorage = storedPlayerId ? localStorage.getItem(`mySecret_${gameId}_${storedPlayerId}`) : null;
+    const gameIdForStoredPlayer = storedPlayerId ? localStorage.getItem(`activeGameId_${storedPlayerId}`) : null;
 
-    if (!storedPlayerId) {
-        toast({ title: "Error", description: "Player identity not found for this game session.", variant: "destructive" });
-        router.push(`/multiplayer-setup`);
+    // Validate that the storedPlayerId is for the current gameId
+    if (!storedPlayerId || gameIdForStoredPlayer !== gameId) {
+        toast({ title: "Error", description: "Player identity mismatch for this game session.", variant: "destructive" });
+        localStorage.removeItem('myPlayerId_activeGame'); // Clear potentially stale ID
+        if (storedPlayerId) localStorage.removeItem(`activeGameId_${storedPlayerId}`); // Clear linked gameId
+        router.push(`/multiplayer-setup`); // Go back to setup
         return;
     }
     
+    const mySecretFromStorage = localStorage.getItem(`mySecret_${gameId}_${storedPlayerId}`);
+
     setGameState(prev => ({
         ...prev,
         myPlayerId: storedPlayerId,
         mySecret: mySecretFromStorage ? JSON.parse(mySecretFromStorage) : Array(CODE_LENGTH).fill(''),
-        gameStatus: 'WAITING_FOR_GAME_START' // Initial status before socket events
+        gameStatus: 'WAITING_FOR_GAME_START' 
     }));
 
-    fetch('/api/socketio', { method: 'POST' }).then(() => { // Ensure server is ready
-        const newSocket = io({ path: '/api/socketio_c', addTrailingSlash: false });
+    fetch('/api/socketio', { method: 'POST' }).then(() => { 
+        const newSocket = io({ path: '/api/socketio_c', addTrailingSlash: false }); // Ensure path matches server
         setSocket(newSocket);
 
         newSocket.on('connect', () => {
             console.log(`MultiplayerPlay: Connected with socket ID ${newSocket.id}`);
-            newSocket.emit('join-game', { gameId, playerCount: playerCountParam || "duo" });
+            // Emit join-game with rejoiningPlayerId if it's set and for the current game
+            newSocket.emit('join-game', { gameId, playerCount: playerCountParam || "duo", rejoiningPlayerId: storedPlayerId });
             toast({title: "Connected to Game", description: `Attempting to join Game ID: ${gameId}`});
         });
         
@@ -82,23 +97,25 @@ export default function MultiplayerPlayPage() {
              if (serverRoomState.gameId === gameId) {
                 const newPlayersData: MultiplayerGameState['playersData'] = {};
                 Object.keys(serverRoomState.players).forEach(pid => {
+                    const serverPlayer = serverRoomState.players[pid];
                     newPlayersData[pid] = {
-                        socketId: serverRoomState.players[pid].socketId,
-                        guessesMade: serverRoomState.players[pid].guessesMade || [],
-                        guessesAgainst: serverRoomState.players[pid].guessesAgainst || [],
+                        socketId: serverPlayer.socketId,
+                        // Ensure guessesMade and guessesAgainst are arrays, even if empty
+                        guessesMade: serverPlayer.guessesMade || [], 
+                        guessesAgainst: serverPlayer.guessesAgainst || [],
                         displayName: pid // Using pid as displayName for now
                     };
                 });
 
                 setGameState(prev => ({
                     ...prev,
-                    myPlayerId: prev.myPlayerId || storedPlayerId, // Ensure myPlayerId is set
-                    mySecret: prev.mySecret.length > 0 ? prev.mySecret : (mySecretFromStorage ? JSON.parse(mySecretFromStorage) : []), // Ensure mySecret is set
+                    myPlayerId: prev.myPlayerId || storedPlayerId, 
+                    mySecret: prev.mySecret.length > 0 ? prev.mySecret : (mySecretFromStorage ? JSON.parse(mySecretFromStorage) : []), 
                     currentTurnPlayerId: serverRoomState.turn || null,
                     playersData: newPlayersData,
                     gameStatus: serverRoomState.status === 'IN_PROGRESS' || serverRoomState.status === 'GAME_OVER' 
                                 ? serverRoomState.status 
-                                : (Object.keys(newPlayersData).length === serverRoomState.playerCount ? 'WAITING_FOR_GAME_START' : 'LOADING'), // More nuanced status
+                                : (Object.keys(newPlayersData).length === serverRoomState.playerCount ? 'WAITING_FOR_GAME_START' : 'LOADING'), 
                     winner: serverRoomState.winner || null,
                     targetMap: serverRoomState.targetMap || null,
                 }));
@@ -110,10 +127,9 @@ export default function MultiplayerPlayPage() {
                 console.log('MultiplayerPlay: Game Start event received', data);
                 setGameState(prev => {
                     const initialPlayersData = { ...prev.playersData };
-                    // Initialize player data stubs if targetMap exists and they aren't there
                     if (data.targetMap) {
                         Object.keys(data.targetMap).forEach(pid => {
-                            if (!initialPlayersData[pid]) {
+                            if (!initialPlayersData[pid]) { // Initialize if missing
                                 initialPlayersData[pid] = { displayName: pid, guessesMade: [], guessesAgainst: [] };
                             }
                         });
@@ -135,17 +151,23 @@ export default function MultiplayerPlayPage() {
                 console.log('MultiplayerPlay: Guess Feedback event received', data);
                 setGameState(prev => {
                     const newPlayersData = { ...prev.playersData };
+                    
                     // Update guessesMade for guessing player
                     if (newPlayersData[data.guessingPlayerId]) {
-                        if(!newPlayersData[data.guessingPlayerId].guessesMade) newPlayersData[data.guessingPlayerId].guessesMade = [];
-                        newPlayersData[data.guessingPlayerId].guessesMade!.push(data.guess);
-                    } else { // Initialize if somehow missing
+                        newPlayersData[data.guessingPlayerId].guessesMade = [
+                            ...(newPlayersData[data.guessingPlayerId].guessesMade || []), // Ensure array exists
+                            data.guess
+                        ];
+                    } else { 
                         newPlayersData[data.guessingPlayerId] = { displayName: data.guessingPlayerId, guessesMade: [data.guess], guessesAgainst: []};
                     }
-                    // Update guessesAgainst for target player (optional for current UI, but good for server state)
+
+                    // Update guessesAgainst for target player
                      if (newPlayersData[data.targetPlayerId]) {
-                        if(!newPlayersData[data.targetPlayerId].guessesAgainst) newPlayersData[data.targetPlayerId].guessesAgainst = [];
-                        newPlayersData[data.targetPlayerId].guessesAgainst!.push(data.guess);
+                        newPlayersData[data.targetPlayerId].guessesAgainst = [
+                            ...(newPlayersData[data.targetPlayerId].guessesAgainst || []), // Ensure array exists
+                            data.guess
+                        ];
                     } else {
                         newPlayersData[data.targetPlayerId] = { displayName: data.targetPlayerId, guessesMade: [], guessesAgainst: [data.guess]};
                     }
@@ -159,7 +181,9 @@ export default function MultiplayerPlayPage() {
             if (data.gameId === gameId) {
                 console.log('MultiplayerPlay: Turn Update event received', data);
                 setGameState(prev => ({ ...prev, currentTurnPlayerId: data.nextPlayerId }));
-                toast({description: `It's ${data.nextPlayerId}'s turn.`})
+                if (gameState.myPlayerId) { // Check if myPlayerId is set before crafting toast
+                     toast({description: `It's ${data.nextPlayerId === gameState.myPlayerId ? 'Your' : data.nextPlayerId + "'s"} turn.`})
+                }
             }
         });
 
@@ -167,13 +191,14 @@ export default function MultiplayerPlayPage() {
             if (data.gameId === gameId) {
                 console.log('MultiplayerPlay: Game Over event received', data);
                 setGameState(prev => ({ ...prev, gameStatus: 'GAME_OVER', winner: data.winner }));
-                toast({title: "Game Over!", description: `${data.winner} is the winner!`, duration: 5000})
+                if (gameState.myPlayerId) { // Check if myPlayerId is set
+                    toast({title: "Game Over!", description: `${data.winner === gameState.myPlayerId ? 'You are' : (gameState.playersData[data.winner]?.displayName || data.winner) + ' is'} the winner!`, duration: 5000});
+                }
             }
         });
         
         newSocket.on('error-event', (data: { message: string }) => {
             toast({ title: "Error", description: data.message, variant: "destructive" });
-            // Potentially redirect or change game state on critical errors
             if (data.message.includes("full") || data.message.includes("No available player slot")) {
                  router.push('/mode-select');
             }
@@ -181,7 +206,7 @@ export default function MultiplayerPlayPage() {
 
         newSocket.on('disconnect', (reason) => {
           console.log('MultiplayerPlay: Disconnected from socket server', reason);
-          toast({ title: "Disconnected", variant: "destructive", description: `Reason: ${reason}. Attempting to reconnect...` });
+          toast({ title: "Disconnected", variant: "destructive", description: `Reason: ${reason}. Please refresh or try rejoining.` });
           setGameState(prev => ({ ...prev, gameStatus: 'LOADING' })); 
         });
 
@@ -191,7 +216,7 @@ export default function MultiplayerPlayPage() {
         };
     });
 
-  }, [gameId, router, toast, playerCountParam]); // Added playerCountParam for join-game
+  }, [gameId, router, toast, playerCountParam, gameState.myPlayerId]); // Added gameState.myPlayerId
 
   const handleMakeGuess = (guessString: string) => {
     if (!socket || !gameId || !gameState.myPlayerId || gameState.currentTurnPlayerId !== gameState.myPlayerId || gameState.gameStatus !== 'IN_PROGRESS') {
@@ -204,16 +229,19 @@ export default function MultiplayerPlayPage() {
   };
 
   const handleExitGame = () => {
+    // Clear all game-specific localStorage for this player
     localStorage.removeItem('myPlayerId_activeGame');
     if (gameState.myPlayerId && gameId) {
       localStorage.removeItem(`mySecret_${gameId}_${gameState.myPlayerId}`);
+      localStorage.removeItem(`activeGameId_${gameState.myPlayerId}`);
     }
     router.push('/mode-select');
     if(socket) socket.disconnect();
   };
   
   const handlePlayAgain = () => {
-    handleExitGame(); // For now, just exit and let them re-setup
+    // For multiplayer, re-joining usually means going back to setup to find/host a new game.
+    handleExitGame(); 
   }
 
   if (gameState.gameStatus === 'LOADING' || !gameState.myPlayerId) {
@@ -226,13 +254,14 @@ export default function MultiplayerPlayPage() {
     );
   }
   
-  if (gameState.gameStatus === 'WAITING_FOR_GAME_START' && (!gameState.targetMap || Object.keys(gameState.playersData).length < (playerCountParam === "duo" ? 2 : 0) )) {
+  const expectedPlayerCount = playerCountParam === "duo" ? 2 : (playerCountParam === "trio" ? 3 : (playerCountParam === "quads" ? 4 : 0));
+  if (gameState.gameStatus === 'WAITING_FOR_GAME_START' && (!gameState.targetMap || Object.keys(gameState.playersData).length < expectedPlayerCount )) {
      return (
       <div className="flex flex-col items-center justify-center min-h-[calc(100vh-200px)]">
         <Hourglass className="h-12 w-12 animate-spin text-primary" />
         <p className="mt-4 text-lg">Waiting for all players and game to start...</p>
         <p className="text-sm text-muted-foreground">Game ID: {gameId}</p>
-         <p className="text-xs">My ID: {gameState.myPlayerId}, Players in room: {Object.keys(gameState.playersData).length}</p>
+         <p className="text-xs">My ID: {gameState.myPlayerId}, Players in room: {Object.keys(gameState.playersData).length}/{expectedPlayerCount}</p>
       </div>
     );
   }
@@ -250,7 +279,7 @@ export default function MultiplayerPlayPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <Button onClick={handlePlayAgain} className="w-full" size="lg">Play Again</Button>
+          <Button onClick={handlePlayAgain} className="w-full" size="lg">Play Again Setup</Button>
           <Button onClick={handleExitGame} className="w-full" size="lg" variant="outline">Exit Game</Button>
         </CardContent>
       </Card>
@@ -262,7 +291,7 @@ export default function MultiplayerPlayPage() {
   return (
     <div className="space-y-6">
       <div className={`text-center py-3 mb-4 rounded-lg bg-card shadow-md ${gameState.currentTurnPlayerId === gameState.myPlayerId ? 'border-2 border-primary ring-2 ring-primary/50' : 'border border-border'}`}>
-        {gameState.currentTurnPlayerId && (
+        {gameState.currentTurnPlayerId && gameState.playersData[gameState.currentTurnPlayerId] && (
             <TurnIndicator 
               currentPlayerName={gameState.playersData[gameState.currentTurnPlayerId]?.displayName || gameState.currentTurnPlayerId} 
               isPlayerTurn={gameState.currentTurnPlayerId === gameState.myPlayerId} 
@@ -272,7 +301,7 @@ export default function MultiplayerPlayPage() {
       </div>
 
       <div className="flex flex-col md:flex-row gap-4 sm:gap-6">
-        {gameState.myPlayerId && (
+        {gameState.myPlayerId && gameState.playersData[gameState.myPlayerId] && (
           <PlayerPanel
             playerName={`${gameState.playersData[gameState.myPlayerId]?.displayName || gameState.myPlayerId} (You)`}
             isCurrentPlayer={true}
@@ -291,7 +320,7 @@ export default function MultiplayerPlayPage() {
             guesses={gameState.playersData[opponentId]?.guessesMade || []} 
             onMakeGuess={() => {}} 
             isSubmitting={false} 
-            secretForDisplay={undefined} 
+            secretForDisplay={undefined} // Opponent's secret is never displayed on client
           />
         )}
         {/* TODO: Add more player panels for Trio/Quads if playerCountParam indicates */}
