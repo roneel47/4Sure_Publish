@@ -31,15 +31,18 @@ let db: MongoDb | null = null;
   }
   try {
     const client = new MongoClient(MONGODB_URI);
+    console.log("Attempting to connect to MongoDB...");
     await client.connect();
+    console.log("Successfully connected to MongoDB.");
     
     const databaseName = "4sureDB"; 
     db = client.db(databaseName);
-    console.log(`Successfully connected to MongoDB. Database: ${databaseName}`);
+    console.log(`MongoDB: Targeting database: '${databaseName}'.`);
 
     const gameRoomsCollection = db.collection<GameRoom>('gameRooms');
+    console.log(`MongoDB: Targeting collection: 'gameRooms' in database '${databaseName}'.`);
     await gameRoomsCollection.createIndex({ gameId: 1 }, { unique: true });
-    console.log(`Ensured unique index on 'gameId' in 'gameRooms' collection in '${databaseName}'.`);
+    console.log(`MongoDB: Ensured unique index on 'gameId' in 'gameRooms' collection in '${databaseName}'. DB setup complete.`);
 
   } catch (error) {
     console.error("Error connecting to MongoDB or ensuring index:", error);
@@ -84,27 +87,23 @@ async function updateGameRoom(gameId: string, operationData: Partial<GameRoom> |
   let mongoUpdateOps: any = {};
 
   try {
-    // Default fields for $setOnInsert when a new document is created
-    // These are applied only if an insert happens.
     const defaultsOnInsert: Partial<GameRoom> = {
-      gameId: gameId, // gameId is the primary identifier, set on insert
+      gameId: gameId, 
       playerCount: (operationData as GameRoom).playerCount !== undefined ? (operationData as GameRoom).playerCount : 0,
-      players: (operationData as GameRoom).players || {},
-      status: (operationData as GameRoom).status || 'WAITING_FOR_PLAYERS',
-      secretsSetCount: (operationData as GameRoom).secretsSetCount || 0,
-      targetMap: (operationData as GameRoom).targetMap || {},
+      players: {},
+      status: 'WAITING_FOR_PLAYERS',
+      secretsSetCount: 0,
+      targetMap: {},
     };
     
     mongoUpdateOps.$setOnInsert = defaultsOnInsert;
 
     if (Object.keys(operationData).some(key => key.startsWith('$'))) {
-      // operationData contains MongoDB operators like $set, $inc, $push
-      // Merge these operators, ensuring gameId is NOT part of any $set.
       for (const opKey in operationData) {
         if (opKey === '$setOnInsert') {
           mongoUpdateOps.$setOnInsert = { ...mongoUpdateOps.$setOnInsert, ...operationData.$setOnInsert };
         } else if (opKey === '$set') {
-          const { gameId: _, ...setFieldsFromOp } = operationData.$set; // Explicitly remove gameId
+          const { gameId: _, ...setFieldsFromOp } = operationData.$set; 
           if (Object.keys(setFieldsFromOp).length > 0) {
             mongoUpdateOps.$set = { ...(mongoUpdateOps.$set || {}), ...setFieldsFromOp };
           }
@@ -113,24 +112,17 @@ async function updateGameRoom(gameId: string, operationData: Partial<GameRoom> |
         }
       }
     } else {
-      // operationData is a plain object of fields to set (e.g., when creating a new room with full data)
-      const { gameId: _gameId, ...fieldsToSet } = operationData; // Exclude gameId from direct $set
+      const { gameId: _gameId, ...fieldsToSet } = operationData; 
       if (Object.keys(fieldsToSet).length > 0) {
         mongoUpdateOps.$set = { ...(mongoUpdateOps.$set || {}), ...fieldsToSet };
       }
-      // For upsert where new document is created, $setOnInsert should reflect all initial fields from operationData
       mongoUpdateOps.$setOnInsert = { ...mongoUpdateOps.$setOnInsert, ...operationData };
-      // Ensure gameId in $setOnInsert is strictly the one from the filter
       mongoUpdateOps.$setOnInsert.gameId = gameId; 
     }
 
-    // Clean up $set if it's empty
     if (mongoUpdateOps.$set && Object.keys(mongoUpdateOps.$set).length === 0) {
       delete mongoUpdateOps.$set;
     }
-    // If after all operations, mongoUpdateOps is effectively empty (only $setOnInsert with just gameId, or nothing else)
-    // This can be valid if the intent is just to ensure the document exists via upsert.
-    // findOneAndUpdate will handle this: if no update ops besides $setOnInsert, it only acts on insert.
 
     const options: FindOneAndUpdateOptions = { upsert: true, returnDocument: 'after' };
     
@@ -145,9 +137,6 @@ async function updateGameRoom(gameId: string, operationData: Partial<GameRoom> |
       return data as GameRoom;
     }
     
-    // If findOneAndUpdate returns null on an upsert, it's unusual.
-    // It might happen if the document was deleted by another process between the find and modify phases,
-    // or if there's a very specific condition not met for the upsert.
     console.warn(`MongoDB: findOneAndUpdate for game ${gameId} returned null. Filter: ${JSON.stringify(filter)}, Operation: ${JSON.stringify(mongoUpdateOps)}. Attempting direct find.`);
     const existingRoom = await db.collection<GameRoom>('gameRooms').findOne(filter);
     if (existingRoom) {
@@ -155,15 +144,14 @@ async function updateGameRoom(gameId: string, operationData: Partial<GameRoom> |
         const { _id, ...data } = existingRoom as any;
         return data as GameRoom;
     }
-    console.warn(`MongoDB: Room ${gameId} still not found after null from findOneAndUpdate (means upsert likely failed without error, or document was immediately deleted).`);
+    console.warn(`MongoDB: Room ${gameId} still not found after null from findOneAndUpdate. Upsert may have failed.`);
     return null;
 
   } catch (error: any) {
     console.error(`MongoDB: Error updating/upserting game room ${gameId}:`, error);
-    // Log the specific update document that caused a conflict
     if (error.code === 40 || error.message?.includes("conflict at 'gameId'")) {
-        console.error("Filter that might have caused conflict:", JSON.stringify(filter, null, 2));
-        console.error("Update document that might have caused conflict:", JSON.stringify(mongoUpdateOps, null, 2));
+        console.error("Filter that might have caused 'gameId' conflict:", JSON.stringify(filter, null, 2));
+        console.error("Update document that might have caused 'gameId' conflict:", JSON.stringify(mongoUpdateOps, null, 2));
     }
     return null;
   }
@@ -193,26 +181,20 @@ export default function handler(
           const playerId = socket.playerId;
           console.log(`Socket disconnected: ${socket.id}, Player: ${playerId}, Game: ${gameId}`);
 
-          if (gameId && playerId && db) { // Ensure db is available
+          if (gameId && playerId && db) { 
             try {
               let room = await getGameRoom(gameId);
               if (room && room.players[playerId]) {
-                // Example: Mark player as inactive or handle game state
-                // For simplicity, just log and notify.
-                // A more complex app might delete the player or award win to opponent.
-                
                 io.to(gameId).emit('player-disconnected', { 
                   gameId, 
                   playerId,
                   message: `${playerId} has disconnected.` 
                 });
                 
-                // If it's a duo game and one player disconnects, the other might win
                 if (room.playerCount === 2 && room.status === 'IN_PROGRESS') {
-                    const remainingPlayerIds = Object.keys(room.players).filter(pId => pId !== playerId);
+                    const remainingPlayerIds = Object.keys(room.players).filter(pId => pId !== playerId && room!.players[pId].socketId !== socket.id); // Check socketID too in case of quick reconnect
                     if (remainingPlayerIds.length === 1) {
                         const winnerId = remainingPlayerIds[0];
-                        // Check if winnerId is still a valid player in the room (e.g. not also disconnected)
                         if (room.players[winnerId]) {
                              const gameOverUpdate = { status: 'GAME_OVER' as MultiplayerGameStatus, winner: winnerId, turn: undefined };
                              const updatedRoom = await updateGameRoom(gameId, { $set: gameOverUpdate });
@@ -222,12 +204,7 @@ export default function handler(
                              }
                         }
                     }
-                } else if (room.status !== 'GAME_OVER') { // For other cases, just send state update
-                    // Potentially remove player from room or mark inactive
-                    // const updateOps = { $unset: { [`players.${playerId}`]: "" } }; // Example to remove player
-                    // const updatedRoom = await updateGameRoom(gameId, updateOps);
-                    // if (updatedRoom) io.to(gameId).emit('game-state-update', updatedRoom);
-                    // For now, just re-fetch and send
+                } else if (room.status !== 'GAME_OVER') { 
                     const currentRoomState = await getGameRoom(gameId);
                     if (currentRoomState) io.to(gameId).emit('game-state-update', currentRoomState);
                 }
@@ -266,14 +243,14 @@ export default function handler(
             initialPlayers[assignedPlayerId] = playerObjectBase;
 
             const newRoomData: GameRoom = {
-              gameId, // Will be set by $setOnInsert.gameId
+              gameId, 
               playerCount: numPlayerCount,
               players: initialPlayers,
               status: 'WAITING_FOR_PLAYERS',
               secretsSetCount: 0,
               targetMap: {},
             };
-            room = await updateGameRoom(gameId, newRoomData); // This call will use $setOnInsert for all fields
+            room = await updateGameRoom(gameId, newRoomData); 
             if (!room) {
                 socket.emit('error-event', { message: 'Failed to create game room data.' });
                 console.error(`Failed to create game room ${gameId} with newRoomData: ${JSON.stringify(newRoomData)}`);
@@ -310,14 +287,20 @@ export default function handler(
                 return;
             }
             
-            const playerUpdatePayload: any = {
-                $set: {
-                    [`players.${assignedPlayerId}.socketId`]: socket.id
+            const playerUpdatePayload: any = {};
+            // Use $set to create/update the player object. If player exists, only socketId is updated.
+            // If player doesn't exist, the whole playerObjectBase is set.
+            playerUpdatePayload.$set = { 
+                [`players.${assignedPlayerId}`]: { 
+                    ...(room.players[assignedPlayerId] || playerObjectBase), // retain existing data if player rejoining
+                    socketId: socket.id // always update socketId
                 }
             };
-            if (!room.players[assignedPlayerId]) { 
+            // If it's a new player being added to an existing room, ensure their basic structure is set
+            if (!room.players[assignedPlayerId]) {
                 playerUpdatePayload.$set[`players.${assignedPlayerId}`] = playerObjectBase;
             }
+
 
             const updatedRoomAfterPlayerJoin = await updateGameRoom(gameId, playerUpdatePayload);
             if (!updatedRoomAfterPlayerJoin) {
@@ -371,43 +354,18 @@ export default function handler(
           
           if (room.players[playerId].secret && room.players[playerId].secret!.length > 0) {
              console.log(`Player ${playerId} trying to set secret again for ${gameId}. Already set.`);
-             // Send current state as confirmation that secret is indeed set server-side
              io.to(gameId).emit('game-state-update', room); 
              return;
           }
           
-          // Use a conditional update to only set the secret and increment if it's not already set.
-          // This helps prevent race conditions if client sends multiple times.
-          const filterForSecretSet = { 
-            gameId, 
-            [`players.${playerId}.secret`]: { $exists: false } 
-          };
-          const updatePayloadIfSecretNotSet: any = {
-            $set: { 
-                [`players.${playerId}.secret`]: secret,
-                status: 'SETTING_SECRETS' as MultiplayerGameStatus 
-            },
-            $inc: { secretsSetCount: 1 }
-          };
-          
-          const updatedRoom = await updateGameRoom(gameId, updatePayloadIfSecretNotSet); // findOneAndUpdate with filterOverride is not what we want here.
-                                                                                              // updateGameRoom's internal filter is {gameId: gameId}.
-                                                                                              // We need a way to pass the conditional player secret check.
-                                                                                              // For now, let's simplify and rely on the initial check.
-
-          // Re-fetch room to get the absolute current state after attempting update
-          // This handles the case where another process might have updated it or the conditional update failed.
-          // Simpler approach for now:
            const setSecretUpdate: any = {
                 $set: {
                     [`players.${playerId}.secret`]: secret,
-                    status: 'SETTING_SECRETS' // Ensure status is updated
+                    status: 'SETTING_SECRETS' 
                 },
                 $inc: { secretsSetCount: 1 }
             };
-            // This will increment secretsSetCount even if secret was already there due to a race.
-            // The client-side check (room.players[playerId].secret) is crucial.
-            // A more robust solution involves specific query for conditional update.
+            
             const roomAfterSecretAttempt = await updateGameRoom(gameId, setSecretUpdate);
 
 
@@ -440,8 +398,7 @@ export default function handler(
             if (room.playerCount === 2) { 
                targetMap = { [playerIds[0]]: playerIds[1], [playerIds[1]]: playerIds[0] };
             } 
-            // TODO: Implement targetMap for Trio/Quads for future
-
+            
             const startingTurn = playerIds[Math.floor(Math.random() * playerIds.length)];
             
             const gameStartUpdatePayload = { 
@@ -494,7 +451,6 @@ export default function handler(
           const updateFields: any = {
             $push: {
               [`players.${playerId}.guessesMade`]: guessObject,
-              // [`players.${targetPlayerId}.guessesAgainst`]: guessObject, // Store on target as well if needed
             }
           };
           
@@ -518,17 +474,12 @@ export default function handler(
           }
           room = updatedRoomAfterGuess;
           
-          // When sending guess feedback, it's often useful for all players to see who guessed what against whom.
-          // The current PlayerPanel on client might only show guessesMade by that player.
-          // For simplicity, we send full updated room state.
-          // io.to(gameId).emit('guess-feedback', { gameId, guessingPlayerId: playerId, targetPlayerId, guess: guessObject });
-          
           if (room.status === 'GAME_OVER') {
             io.to(gameId).emit('game-over', { gameId, winner: room.winner! });
           } else {
             io.to(gameId).emit('turn-update', { gameId, nextPlayerId: room.turn! });
           }
-          io.to(gameId).emit('game-state-update', room); // This provides the most comprehensive update
+          io.to(gameId).emit('game-state-update', room); 
         });
       });
     }
