@@ -23,13 +23,13 @@ export default function LoginForm() {
 
   const handleLogin = () => {
     login(inputUsername.trim() || undefined); // Pass trimmed username or undefined to generate random
-    router.push("/setup");
+    router.push("/mode-select"); // Changed from /setup to /mode-select
   };
 
   if (isLoggedIn) {
     // This case should ideally be handled by redirect in page.tsx or layout.tsx
     // For robustness, if user is logged in and somehow lands here, redirect.
-    if (typeof window !== 'undefined') router.push("/setup");
+    if (typeof window !== 'undefined') router.push("/mode-select"); // Changed
     return null;
   }
 

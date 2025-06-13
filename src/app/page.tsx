@@ -11,7 +11,7 @@ export default function LoginPage() {
 
   useEffect(() => {
     if (!isAuthLoading && isLoggedIn) {
-      router.replace("/setup");
+      router.replace("/mode-select"); // Changed from /setup to /mode-select
     }
   }, [isLoggedIn, isAuthLoading, router]);
 
