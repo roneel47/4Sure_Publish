@@ -27,7 +27,8 @@ export default function MultiplayerSecretSetupPage() {
   const [socket, setSocket] = useState<ClientSocket | null>(null);
   const [allPlayersJoined, setAllPlayersJoined] = useState(false);
   const [secretsCurrentlySet, setSecretsCurrentlySet] = useState(0);
-  const [totalPlayersInGame, setTotalPlayersInGame] = useState(0);
+  const [actualPlayersInGame, setActualPlayersInGame] = useState(0); // Changed from totalPlayersInGame
+  const [expectedPlayerCount, setExpectedPlayerCount] = useState(0); // Added for clarity
   const [connectionStatus, setConnectionStatus] = useState<"connecting" | "connected" | "failed" | "room_full" | "error">("connecting");
 
 
@@ -37,6 +38,8 @@ export default function MultiplayerSecretSetupPage() {
         router.push('/mode-select');
         return;
     }
+    const expectedCount = playerCountParam === "duo" ? 2 : playerCountParam === "trio" ? 3 : 4;
+    setExpectedPlayerCount(expectedCount);
 
     const activePlayerId = localStorage.getItem('myPlayerId_activeGame');
     if(activePlayerId){
@@ -54,7 +57,7 @@ export default function MultiplayerSecretSetupPage() {
         return res.json();
       })
       .then(() => {
-        const newSocket = io({ path: '/api/socketio_c', addTrailingSlash: false }); // Ensure path matches server
+        const newSocket = io({ path: '/api/socketio_c', addTrailingSlash: false }); 
         setSocket(newSocket);
 
         newSocket.on('connect', () => {
@@ -62,14 +65,12 @@ export default function MultiplayerSecretSetupPage() {
           setConnectionStatus("connected");
           if (gameId && playerCountParam) {
             const rejoiningPlayerId = localStorage.getItem('myPlayerId_activeGame');
-            // If rejoining and gameId in localStorage matches current gameId, send rejoiningPlayerId
             const storedGameIdForPlayer = localStorage.getItem(`activeGameId_${rejoiningPlayerId}`);
             if (rejoiningPlayerId && storedGameIdForPlayer === gameId) {
                  newSocket.emit('join-game', { gameId, playerCount: playerCountParam, rejoiningPlayerId: rejoiningPlayerId });
             } else {
-                // Fresh join or gameId mismatch, clear old player id for this session
                 localStorage.removeItem('myPlayerId_activeGame');
-                localStorage.removeItem(`activeGameId_${rejoiningPlayerId}`); // Clean up old gameId link
+                if (rejoiningPlayerId) localStorage.removeItem(`activeGameId_${rejoiningPlayerId}`); 
                 newSocket.emit('join-game', { gameId, playerCount: playerCountParam });
             }
           }
@@ -80,7 +81,7 @@ export default function MultiplayerSecretSetupPage() {
             console.log(`Assigned as ${data.playerId} for game ${gameId}`);
             setMyPlayerId(data.playerId);
             localStorage.setItem('myPlayerId_activeGame', data.playerId); 
-            localStorage.setItem(`activeGameId_${data.playerId}`, gameId); // Link player to this gameId
+            localStorage.setItem(`activeGameId_${data.playerId}`, gameId); 
             
             const storedSecret = localStorage.getItem(`mySecret_${gameId}_${data.playerId}`);
             if(storedSecret) {
@@ -91,27 +92,35 @@ export default function MultiplayerSecretSetupPage() {
           }
         });
         
-        newSocket.on('game-state-update', (serverGameState: ServerGameRoom) => { // Use ServerGameRoom type
+        newSocket.on('game-state-update', (serverGameState: ServerGameRoom) => { 
             if (serverGameState.gameId === gameId) {
                 console.log('Received game-state-update in secret setup:', serverGameState);
                 if (myPlayerId && serverGameState.players[myPlayerId]?.secret?.length) {
                     setHasSubmittedSecret(true);
                 }
                 setSecretsCurrentlySet(serverGameState.secretsSetCount);
-                setTotalPlayersInGame(serverGameState.playerCount); // Use server's player count
-                if (Object.keys(serverGameState.players).length === serverGameState.playerCount) {
+                // Update actual players based on the players object keys with socketIds
+                setActualPlayersInGame(Object.values(serverGameState.players).filter(p => p.socketId).length);
+                setExpectedPlayerCount(serverGameState.playerCount); // Ensure expected count is from server
+                
+                if (Object.values(serverGameState.players).filter(p => p.socketId).length === serverGameState.playerCount) {
                     setAllPlayersJoined(true);
                 } else {
                     setAllPlayersJoined(false);
+                }
+
+                // If game has started and this client is still on setup, move them
+                if(serverGameState.status === 'IN_PROGRESS' || serverGameState.status === 'GAME_OVER') {
+                    router.push(`/multiplayer-play?gameId=${gameId}&playerCount=${playerCountParam}`);
                 }
             }
         });
 
 
-        newSocket.on('player-joined', (data: {playerId: string, playersInRoom: number, totalPlayerCapacity: number}) => { // Updated event data
+        newSocket.on('player-joined', (data: {playerId: string, playersInRoom: number, totalPlayerCapacity: number}) => { 
            console.log('Player joined event:', data);
-           setTotalPlayersInGame(data.playersInRoom); // This should be playerCount from server
-           // secretsCurrentlySet updated by 'secret-update' or 'game-state-update'
+           setActualPlayersInGame(data.playersInRoom);
+           setExpectedPlayerCount(data.totalPlayerCapacity);
            if (data.playersInRoom === data.totalPlayerCapacity) {
              setAllPlayersJoined(true);
            }
@@ -124,7 +133,6 @@ export default function MultiplayerSecretSetupPage() {
           if (data.gameId === gameId) {
             console.log('All players have joined the game:', gameId);
             setAllPlayersJoined(true);
-            // totalPlayersInGame should be updated by game-state-update ideally
             toast({ title: "Ready to Set Secrets!", description: "All players have joined." });
           }
         });
@@ -132,7 +140,7 @@ export default function MultiplayerSecretSetupPage() {
         newSocket.on('secret-update', (data: { playerId: string; secretSet: boolean; secretsCurrentlySet: number; totalPlayers: number }) => {
           console.log('Secret update received:', data);
           setSecretsCurrentlySet(data.secretsCurrentlySet);
-          setTotalPlayersInGame(data.totalPlayers);
+          setExpectedPlayerCount(data.totalPlayers); // Ensure expected count is from server
           if (data.playerId === myPlayerId && data.secretSet) {
             setHasSubmittedSecret(true);
           }
@@ -166,8 +174,6 @@ export default function MultiplayerSecretSetupPage() {
             toast({ title: "Error", description: data.message, variant: "destructive" });
             if (data.message.toLowerCase().includes("full")) {
                 setConnectionStatus("room_full");
-            } else if (data.message.toLowerCase().includes("failed to create game room data")) {
-                 setConnectionStatus("error"); // Keep it generic error
             } else {
                 setConnectionStatus("error");
             }
@@ -185,7 +191,9 @@ export default function MultiplayerSecretSetupPage() {
         setConnectionStatus("failed");
         toast({ title: "Connection Setup Failed", description: "Could not contact the game server.", variant: "destructive" });
       });
-  }, [gameId, playerCountParam, toast, router, myPlayerId]); // myPlayerId dependency to re-evaluate if it changes
+  // myPlayerId dependency removed as it could cause loop if server re-assigns due to quick disconnect/reconnect
+  // eslint-disable-next-line react-hooks/exhaustive-deps 
+  }, [gameId, playerCountParam, toast, router]); 
 
 
   const handleSecretSubmit = async () => {
@@ -206,9 +214,9 @@ export default function MultiplayerSecretSetupPage() {
     socket.emit('send-secret', { gameId, playerId: myPlayerId, secret: currentDigits });
     localStorage.setItem(`mySecret_${gameId}_${myPlayerId}`, JSON.stringify(currentDigits));
     
-    // Server confirmation via 'secret-update' or 'game-state-update' will set hasSubmittedSecret
     toast({ title: `Your Secret Sent!`, description: "Waiting for server confirmation and other players..." });
-    setIsSubmittingSecret(false); // Optimistically enable UI, server is source of truth
+    // setHasSubmittedSecret(true); // Optimistically set, but server 'secret-update' is source of truth
+    // setIsSubmittingSecret(false); // Allow UI interaction while waiting for server
   };
 
 
@@ -264,12 +272,11 @@ export default function MultiplayerSecretSetupPage() {
 
   const getWaitingMessage = () => {
     if (!myPlayerId) return "Assigning your player ID...";
-    if (!allPlayersJoined || totalPlayersInGame === 0) {
-        const expectedPlayers = playerCountParam === "duo" ? 2 : playerCountParam === "trio" ? 3 : 4;
-        return `Waiting for players... (${totalPlayersInGame > 0 ? totalPlayersInGame : '?'}/${expectedPlayers})`;
+    if (!allPlayersJoined || actualPlayersInGame < expectedPlayerCount) {
+        return `Waiting for players... (${actualPlayersInGame > 0 ? actualPlayersInGame : '?'}/${expectedPlayerCount > 0 ? expectedPlayerCount : '?'})`;
     }
-    if (secretsCurrentlySet < totalPlayersInGame) {
-        return `Waiting for secrets... (${secretsCurrentlySet}/${totalPlayersInGame})`;
+    if (secretsCurrentlySet < expectedPlayerCount) { // Use expectedPlayerCount for total comparison
+        return `Waiting for secrets... (${secretsCurrentlySet}/${expectedPlayerCount})`;
     }
     return "All secrets set. Starting game soon...";
   }
@@ -288,7 +295,7 @@ export default function MultiplayerSecretSetupPage() {
             {!hasSubmittedSecret && myPlayerId && allPlayersJoined &&
               `Enter a ${CODE_LENGTH}-digit number. No 3 or 4 identical consecutive digits.`
             }
-            {(hasSubmittedSecret || !allPlayersJoined || !myPlayerId) &&
+            {(hasSubmittedSecret || !allPlayersJoined || !myPlayerId || (allPlayersJoined && secretsCurrentlySet < expectedPlayerCount)) &&
                 <span className="flex items-center justify-center mt-2"><Hourglass className="mr-2 h-4 w-4 animate-spin" /> {getWaitingMessage()}</span>
             }
              {!myPlayerId && connectionStatus === "connected" && <span className="flex items-center justify-center mt-2"><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Waiting for player assignment...</span>}
@@ -305,7 +312,7 @@ export default function MultiplayerSecretSetupPage() {
                 ariaLabel={`Secret digit for ${myPlayerId}`}
               />
               <Button onClick={handleSecretSubmit} className="w-full" disabled={isSubmittingSecret} size="lg">
-                {isSubmittingSecret ? 'Submitting...' : `Confirm ${myPlayerId}'s Secret`}
+                {isSubmittingSecret ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Submitting...</> : `Confirm ${myPlayerId}'s Secret`}
               </Button>
             </div>
           )}
@@ -314,9 +321,10 @@ export default function MultiplayerSecretSetupPage() {
           )}
         </CardContent>
          <CardFooter className="flex flex-col items-center">
-            <p className="text-xs text-muted-foreground">Players in Room: {totalPlayersInGame > 0 ? totalPlayersInGame : (playerCountParam === "duo" ? 2 : playerCountParam === "trio" ? 3 : 4)} | Secrets Set: {secretsCurrentlySet}</p>
+            <p className="text-xs text-muted-foreground">Players: {actualPlayersInGame}/{expectedPlayerCount > 0 ? expectedPlayerCount : (playerCountParam === "duo" ? 2 : playerCountParam === "trio" ? 3 : 4)} | Secrets Set: {secretsCurrentlySet}</p>
          </CardFooter>
       </Card>
     </div>
   );
 }
+
