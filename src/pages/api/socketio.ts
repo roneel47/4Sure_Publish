@@ -21,7 +21,7 @@ interface CustomSocket extends Socket {
 }
 
 const MONGODB_URI = process.env.MONGODB_URI;
-const DATABASE_NAME = "4sureDB"; // Explicitly using your DB name
+const DATABASE_NAME = "4SureDB"; // Corrected to match the existing DB case
 const COLLECTION_NAME = "gameRooms";
 let db: MongoDb | null = null;
 
@@ -45,19 +45,12 @@ const dbConnectionPromise = new Promise<MongoDb>((resolve, reject) => {
     await client.connect();
     console.log("Successfully connected to MongoDB.");
     
-    db = client.db(DATABASE_NAME);
+    db = client.db(DATABASE_NAME); // Uses the corrected DATABASE_NAME
     console.log(`MongoDB: Targeting database: '${DATABASE_NAME}'.`);
     
-    // You should create this index manually in Atlas for better control:
+    // Manually create this unique index in Atlas for better control:
     // db.gameRooms.createIndex( { "gameId": 1 }, { unique: true } )
-    // However, attempting here can be a fallback (ensure user has permissions)
-    // try {
-    //   await db.collection(COLLECTION_NAME).createIndex({ gameId: 1 }, { unique: true });
-    //   console.log(`MongoDB: Ensured unique index on 'gameId' in '${COLLECTION_NAME}' collection in '${DATABASE_NAME}'.`);
-    // } catch (indexError) {
-    //   console.warn(`MongoDB: Could not ensure unique index on 'gameId' (it might already exist or permissions issue):`, indexError);
-    // }
-    console.log(`MongoDB: Using collection: '${COLLECTION_NAME}' in database '${DATABASE_NAME}'. DB setup complete.`);
+    // console.log(`MongoDB: Using collection: '${COLLECTION_NAME}' in database '${DATABASE_NAME}'. DB setup complete.`);
     resolveDbConnection(db);
   } catch (error) {
     console.error("Error connecting to MongoDB:", error);
@@ -76,7 +69,7 @@ const getPlayerCountNumber = (playerCountString: string): number => {
 
 async function getGameRoom(gameId: string): Promise<GameRoom | null> {
   try {
-    await dbConnectionPromise; // Wait for DB connection
+    await dbConnectionPromise; 
   } catch (connectionError) {
     console.error(`MongoDB connection error (getGameRoom for ${gameId}):`, connectionError);
     return null;
@@ -101,7 +94,7 @@ async function getGameRoom(gameId: string): Promise<GameRoom | null> {
 
 async function updateGameRoom(gameId: string, operationData: Partial<GameRoom> | any): Promise<GameRoom | null> {
   try {
-    await dbConnectionPromise; // Wait for DB connection
+    await dbConnectionPromise; 
   } catch (connectionError) {
     console.error(`MongoDB connection error (updateGameRoom for ${gameId}):`, connectionError);
     return null;
@@ -134,15 +127,13 @@ async function updateGameRoom(gameId: string, operationData: Partial<GameRoom> |
   } else {
     const { gameId: opGameId, ...fieldsToSet } = operationData;
     mongoUpdateOps.$set = fieldsToSet;
-    // For a plain data update, $setOnInsert should ensure all base fields are present if it's a new doc
-    // and merge with operationData to capture specifics for a new room (like playerCount).
     mongoUpdateOps.$setOnInsert = { ...defaultsOnInsert, ...operationData };
   }
   
   if (mongoUpdateOps.$set && Object.keys(mongoUpdateOps.$set).length === 0) {
       delete mongoUpdateOps.$set;
   }
-  mongoUpdateOps.$setOnInsert.gameId = gameId;
+  mongoUpdateOps.$setOnInsert.gameId = gameId; // Ensure gameId is in $setOnInsert for new docs
 
 
   try {
@@ -157,15 +148,15 @@ async function updateGameRoom(gameId: string, operationData: Partial<GameRoom> |
     // console.log(`MongoDB: UpdateOne operation for game room ${gameId}. Matched: ${result.matchedCount}, Modified: ${result.modifiedCount}, UpsertedId: ${result.upsertedId}`);
 
     if (result.acknowledged) {
-      return await getGameRoom(gameId); // Fetch the updated/created document
+      return await getGameRoom(gameId); 
     }
     
     console.warn(`MongoDB: updateOne for game ${gameId} was not acknowledged or failed. Result:`, result);
     return null;
 
   } catch (error: any) {
-    console.error(`MongoDB: Error in updateGameRoom for ${gameId}.`, error);
-    if (error.code === 40 || error.message?.includes("conflict at 'gameId'")) {
+    console.error(`MongoDB: Error in updateGameRoom for ${gameId}. Filter: ${JSON.stringify(filter)}, Operation: ${JSON.stringify(mongoUpdateOps)}`, error);
+    if (error.code === 40) { // Specific error for 'gameId' conflict
         console.error("Detailed conflict info: Filter:", JSON.stringify(filter), "Operation:", JSON.stringify(mongoUpdateOps));
     }
     return null;
@@ -198,7 +189,7 @@ export default function handler(
 
           if (gameId && playerId) { 
             try {
-              await dbConnectionPromise; // Ensure DB is ready before trying to modify game state
+              await dbConnectionPromise; 
               if (!db) {
                   console.warn(`DB not available during disconnect for player ${playerId} in game ${gameId}`);
                   return;
@@ -244,7 +235,7 @@ export default function handler(
             socket.emit('error-event', { message: 'Database connection error. Please try again later.' });
             return;
           }
-          if (!db) { // Should not happen if promise resolved, but good check
+          if (!db) { 
             socket.emit('error-event', { message: 'Database not connected (post-promise). Please try again later.' });
             return;
           }
@@ -271,7 +262,7 @@ export default function handler(
             initialPlayers[assignedPlayerId] = playerObjectBase;
 
             const newRoomData: Partial<GameRoom> = {
-              gameId: gameId, // Ensure gameId is part of newRoomData for updateGameRoom's $setOnInsert
+              // gameId: gameId, // gameId is already in the filter and $setOnInsert will use it
               playerCount: numPlayerCount,
               players: initialPlayers,
               status: 'WAITING_FOR_PLAYERS',
@@ -390,11 +381,10 @@ export default function handler(
           const setSecretUpdate: any = {
                 $set: {
                     [`players.${playerId}.secret`]: secret,
-                    // status: 'SETTING_SECRETS' // Status should only be set once, perhaps when first secret is set.
                 },
                 $inc: { secretsSetCount: 1 }
             };
-            // Only set status to SETTING_SECRETS if it's currently ALL_PLAYERS_JOINED
+            
             if (room.status === 'ALL_PLAYERS_JOINED') {
                 setSecretUpdate.$set.status = 'SETTING_SECRETS';
             }
