@@ -9,14 +9,12 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import PlayerPanel from '@/components/game/PlayerPanel';
 import TurnIndicator from '@/components/game/TurnIndicator';
 import { Button } from '@/components/ui/button';
-import type { Guess, PlayerData as ServerPlayerData, GameRoom as ServerGameRoom } from '@/types/game'; // Renamed PlayerData to ServerPlayerData
+import type { Guess, PlayerData as ServerPlayerData, GameRoom as ServerGameRoom } from '@/types/game'; 
 import { CODE_LENGTH } from '@/lib/gameLogic';
 import { Award, Hourglass, Loader2 } from 'lucide-react';
 
-// Local PlayerData might have slightly different needs or be a subset
 interface ClientPlayerData extends Partial<ServerPlayerData> {
   displayName: string; 
-  // Explicitly define guessesMade and guessesAgainst as potentially undefined or arrays
   guessesMade?: Guess[];
   guessesAgainst?: Guess[];
 }
@@ -26,7 +24,7 @@ interface MultiplayerGameState {
   myPlayerId: string | null;
   mySecret: string[]; 
   currentTurnPlayerId: string | null;
-  playersData: { [playerId: string]: ClientPlayerData }; // Use ClientPlayerData
+  playersData: { [playerId: string]: ClientPlayerData }; 
   gameStatus: 'LOADING' | 'WAITING_FOR_GAME_START' | 'IN_PROGRESS' | 'GAME_OVER';
   winner: string | null;
   targetMap: { [playerId: string]: string } | null; 
@@ -37,8 +35,8 @@ export default function MultiplayerPlayPage() {
   const searchParams = useSearchParams();
   const { toast } = useToast();
 
-  const gameId = searchParams.get('gameId');
-  const playerCountParam = searchParams.get('playerCount');
+  const gameId = searchParams ? searchParams.get('gameId') : null;
+  const playerCountParam = searchParams ? searchParams.get('playerCount') : "duo"; // Default to duo
 
   const [socket, setSocket] = useState<ClientSocket | null>(null);
   const [gameState, setGameState] = useState<MultiplayerGameState>({
@@ -59,16 +57,14 @@ export default function MultiplayerPlayPage() {
       return;
     }
 
-    // Retrieve playerId and associated gameId from localStorage
     const storedPlayerId = localStorage.getItem('myPlayerId_activeGame');
     const gameIdForStoredPlayer = storedPlayerId ? localStorage.getItem(`activeGameId_${storedPlayerId}`) : null;
 
-    // Validate that the storedPlayerId is for the current gameId
     if (!storedPlayerId || gameIdForStoredPlayer !== gameId) {
         toast({ title: "Error", description: "Player identity mismatch for this game session.", variant: "destructive" });
-        localStorage.removeItem('myPlayerId_activeGame'); // Clear potentially stale ID
-        if (storedPlayerId) localStorage.removeItem(`activeGameId_${storedPlayerId}`); // Clear linked gameId
-        router.push(`/multiplayer-setup`); // Go back to setup
+        localStorage.removeItem('myPlayerId_activeGame'); 
+        if (storedPlayerId) localStorage.removeItem(`activeGameId_${storedPlayerId}`); 
+        router.push(`/multiplayer-setup`); 
         return;
     }
     
@@ -81,13 +77,14 @@ export default function MultiplayerPlayPage() {
         gameStatus: 'WAITING_FOR_GAME_START' 
     }));
 
+    // Ensure API route for Socket.IO is hit to initialize server if not already.
+    // The actual connection happens via `io()` call.
     fetch('/api/socketio', { method: 'POST' }).then(() => { 
-        const newSocket = io({ path: '/api/socketio_c', addTrailingSlash: false }); // Ensure path matches server
+        const newSocket = io({ path: '/api/socketio_c', addTrailingSlash: false, transports: ['websocket'] }); 
         setSocket(newSocket);
 
         newSocket.on('connect', () => {
             console.log(`MultiplayerPlay: Connected with socket ID ${newSocket.id}`);
-            // Emit join-game with rejoiningPlayerId if it's set and for the current game
             newSocket.emit('join-game', { gameId, playerCount: playerCountParam || "duo", rejoiningPlayerId: storedPlayerId });
             toast({title: "Connected to Game", description: `Attempting to join Game ID: ${gameId}`});
         });
@@ -100,10 +97,9 @@ export default function MultiplayerPlayPage() {
                     const serverPlayer = serverRoomState.players[pid];
                     newPlayersData[pid] = {
                         socketId: serverPlayer.socketId,
-                        // Ensure guessesMade and guessesAgainst are arrays, even if empty
                         guessesMade: serverPlayer.guessesMade || [], 
                         guessesAgainst: serverPlayer.guessesAgainst || [],
-                        displayName: pid // Using pid as displayName for now
+                        displayName: pid 
                     };
                 });
 
@@ -129,7 +125,7 @@ export default function MultiplayerPlayPage() {
                     const initialPlayersData = { ...prev.playersData };
                     if (data.targetMap) {
                         Object.keys(data.targetMap).forEach(pid => {
-                            if (!initialPlayersData[pid]) { // Initialize if missing
+                            if (!initialPlayersData[pid]) { 
                                 initialPlayersData[pid] = { displayName: pid, guessesMade: [], guessesAgainst: [] };
                             }
                         });
@@ -152,20 +148,18 @@ export default function MultiplayerPlayPage() {
                 setGameState(prev => {
                     const newPlayersData = { ...prev.playersData };
                     
-                    // Update guessesMade for guessing player
                     if (newPlayersData[data.guessingPlayerId]) {
                         newPlayersData[data.guessingPlayerId].guessesMade = [
-                            ...(newPlayersData[data.guessingPlayerId].guessesMade || []), // Ensure array exists
+                            ...(newPlayersData[data.guessingPlayerId].guessesMade || []), 
                             data.guess
                         ];
                     } else { 
                         newPlayersData[data.guessingPlayerId] = { displayName: data.guessingPlayerId, guessesMade: [data.guess], guessesAgainst: []};
                     }
 
-                    // Update guessesAgainst for target player
                      if (newPlayersData[data.targetPlayerId]) {
                         newPlayersData[data.targetPlayerId].guessesAgainst = [
-                            ...(newPlayersData[data.targetPlayerId].guessesAgainst || []), // Ensure array exists
+                            ...(newPlayersData[data.targetPlayerId].guessesAgainst || []), 
                             data.guess
                         ];
                     } else {
@@ -181,7 +175,7 @@ export default function MultiplayerPlayPage() {
             if (data.gameId === gameId) {
                 console.log('MultiplayerPlay: Turn Update event received', data);
                 setGameState(prev => ({ ...prev, currentTurnPlayerId: data.nextPlayerId }));
-                if (gameState.myPlayerId) { // Check if myPlayerId is set before crafting toast
+                if (gameState.myPlayerId) { 
                      toast({description: `It's ${data.nextPlayerId === gameState.myPlayerId ? 'Your' : data.nextPlayerId + "'s"} turn.`})
                 }
             }
@@ -191,7 +185,7 @@ export default function MultiplayerPlayPage() {
             if (data.gameId === gameId) {
                 console.log('MultiplayerPlay: Game Over event received', data);
                 setGameState(prev => ({ ...prev, gameStatus: 'GAME_OVER', winner: data.winner }));
-                if (gameState.myPlayerId) { // Check if myPlayerId is set
+                if (gameState.myPlayerId) { 
                     toast({title: "Game Over!", description: `${data.winner === gameState.myPlayerId ? 'You are' : (gameState.playersData[data.winner]?.displayName || data.winner) + ' is'} the winner!`, duration: 5000});
                 }
             }
@@ -216,7 +210,7 @@ export default function MultiplayerPlayPage() {
         };
     });
 
-  }, [gameId, router, toast, playerCountParam, gameState.myPlayerId]); // Added gameState.myPlayerId
+  }, [gameId, router, toast, playerCountParam, gameState.myPlayerId]); 
 
   const handleMakeGuess = (guessString: string) => {
     if (!socket || !gameId || !gameState.myPlayerId || gameState.currentTurnPlayerId !== gameState.myPlayerId || gameState.gameStatus !== 'IN_PROGRESS') {
@@ -229,7 +223,6 @@ export default function MultiplayerPlayPage() {
   };
 
   const handleExitGame = () => {
-    // Clear all game-specific localStorage for this player
     localStorage.removeItem('myPlayerId_activeGame');
     if (gameState.myPlayerId && gameId) {
       localStorage.removeItem(`mySecret_${gameId}_${gameState.myPlayerId}`);
@@ -240,7 +233,6 @@ export default function MultiplayerPlayPage() {
   };
   
   const handlePlayAgain = () => {
-    // For multiplayer, re-joining usually means going back to setup to find/host a new game.
     handleExitGame(); 
   }
 
@@ -297,7 +289,6 @@ export default function MultiplayerPlayPage() {
               isPlayerTurn={gameState.currentTurnPlayerId === gameState.myPlayerId} 
             />
         )}
-        {/* Multiplayer timer could be complex due to sync; not implemented for now */}
       </div>
 
       <div className="flex flex-col md:flex-row gap-4 sm:gap-6">
@@ -320,12 +311,12 @@ export default function MultiplayerPlayPage() {
             guesses={gameState.playersData[opponentId]?.guessesMade || []} 
             onMakeGuess={() => {}} 
             isSubmitting={false} 
-            secretForDisplay={undefined} // Opponent's secret is never displayed on client
+            secretForDisplay={undefined} 
           />
         )}
-        {/* TODO: Add more player panels for Trio/Quads if playerCountParam indicates */}
       </div>
        <Button onClick={handleExitGame} variant="outline" className="mt-6">Exit Game</Button>
     </div>
   );
 }
+
