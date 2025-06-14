@@ -12,33 +12,35 @@ export type GameStatus =
 
 // Multiplayer Specific Types
 export type MultiplayerGameStatus =
-  | "WAITING_FOR_PLAYERS"
-  | "ALL_PLAYERS_JOINED"
-  | "SETTING_SECRETS"
-  | "IN_PROGRESS"
-  | "GAME_OVER";
+  | "WAITING_FOR_PLAYERS"      // Initial state, room created, waiting for enough players
+  | "WAITING_FOR_READY"        // All player slots are filled, waiting for players to set secrets
+  | "READY_TO_START"           // All connected players have set secrets, player1 can initiate start
+  | "IN_PROGRESS"              // Game is actively being played
+  | "GAME_OVER";               // Game has concluded
 
 export interface PlayerData {
-  socketId: string;
+  socketId?: string; // Optional: can be undefined if player disconnected
   secret?: string[];
-  guessesMade?: Guess[]; // Guesses this player made against their target
-  guessesAgainst?: Guess[]; // Guesses made by others against this player's secret
-  hasSetSecret?: boolean; // True if this player has submitted their secret
+  guessesMade?: Guess[];
+  guessesAgainst?: Guess[];
+  hasSetSecret?: boolean; // True if this player has submitted their secret data
+  isReady?: boolean;      // True if player has confirmed their secret and is ready for game to start
+  // displayName?: string; // Future enhancement
 }
 
 export interface GameRoom {
   gameId: string;
-  playerCount: number; // e.g., 2 for Duo, 3 for Trio
-  players: { [playerId: string]: PlayerData }; // e.g., "player1", "player2"
+  playerCount: number; 
+  players: { [playerId: string]: PlayerData }; 
   status: MultiplayerGameStatus;
-  turn?: string; // playerId whose turn it is
-  targetMap?: { [playerId: string]: string }; // Who guesses whom, e.g., player1 targets player2
-  winner?: string; // playerId of the winner
-  // secretsSetCount: number; // Replaced by checking hasSetSecret on all players
+  turn?: string; 
+  targetMap?: { [playerId: string]: string }; 
+  winner?: string; 
   createdAt?: Date; // For TTL index
 }
 
-// Structure for the in-memory store on the server
+// Structure for the in-memory store on the server (if not using DB for everything)
 export interface GameRoomsStore {
   [gameId: string]: GameRoom;
 }
+

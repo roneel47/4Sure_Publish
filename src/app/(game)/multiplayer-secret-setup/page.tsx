@@ -7,10 +7,10 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import DigitInput from '@/components/game/DigitInput';
 import { CODE_LENGTH, isValidDigitSequence } from '@/lib/gameLogic';
 import { useToast } from '@/hooks/use-toast';
-import { LockKeyhole, Users, ArrowRight, Loader2, UserCheck, Hourglass } from 'lucide-react';
+import { LockKeyhole, Users, Loader2, UserCheck, Hourglass, Play, ShieldCheck, ShieldAlert } from 'lucide-react';
 import type { Socket as ClientSocket } from 'socket.io-client';
 import { io } from 'socket.io-client';
-import type { GameRoom as ServerGameRoom } from '@/types/game'; // Import ServerGameRoom
+import type { GameRoom as ServerGameRoom, PlayerData as ServerPlayerData, MultiplayerGameStatus } from '@/types/game';
 
 export default function MultiplayerSecretSetupPage() {
   const router = useRouter();
@@ -23,14 +23,12 @@ export default function MultiplayerSecretSetupPage() {
   const [myPlayerId, setMyPlayerId] = useState<string | null>(null);
   const [currentDigits, setCurrentDigits] = useState<string[]>(Array(CODE_LENGTH).fill(''));
   const [isSubmittingSecret, setIsSubmittingSecret] = useState(false);
-  const [hasSubmittedSecret, setHasSubmittedSecret] = useState(false);
+  // const [hasSubmittedSecret, setHasSubmittedSecret] = useState(false); // Replaced by checking gameRoomState.players[myPlayerId]?.isReady
   const [socket, setSocket] = useState<ClientSocket | null>(null);
-  const [allPlayersJoined, setAllPlayersJoined] = useState(false);
-  const [secretsActuallySet, setSecretsActuallySet] = useState(0); // Renamed from secretsCurrentlySet
-  const [actualPlayersInGame, setActualPlayersInGame] = useState(0);
-  const [expectedPlayerCount, setExpectedPlayerCount] = useState(0); 
+  const [gameRoomState, setGameRoomState] = useState<ServerGameRoom | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<"connecting" | "connected" | "failed" | "room_full" | "error">("connecting");
 
+  const expectedPlayerCount = playerCountParam === "duo" ? 2 : playerCountParam === "trio" ? 3 : 4;
 
   useEffect(() => {
     if (!gameId || !playerCountParam) {
@@ -38,18 +36,9 @@ export default function MultiplayerSecretSetupPage() {
         router.push('/mode-select');
         return;
     }
-    const expectedCount = playerCountParam === "duo" ? 2 : playerCountParam === "trio" ? 3 : 4;
-    setExpectedPlayerCount(expectedCount);
 
-    const activePlayerId = localStorage.getItem('myPlayerId_activeGame');
-    if(activePlayerId){
-        const storedSecretForGame = localStorage.getItem(`mySecret_${gameId}_${activePlayerId}`);
-        if (storedSecretForGame) {
-            setHasSubmittedSecret(true); 
-            setCurrentDigits(JSON.parse(storedSecretForGame));
-        }
-    }
-
+    const activePlayerIdFromStorage = localStorage.getItem('myPlayerId_activeGame');
+    // Optional: Check if this gameId matches a stored gameId for activePlayerIdFromStorage if implementing rejoin for specific game
 
     fetch('/api/socketio', { method: 'POST' }) 
       .then((res) => {
@@ -64,9 +53,8 @@ export default function MultiplayerSecretSetupPage() {
           console.log('Connected to Socket.IO server with ID:', newSocket.id);
           setConnectionStatus("connected");
           if (gameId && playerCountParam) {
-            const rejoiningPlayerId = localStorage.getItem('myPlayerId_activeGame');
-            // Server will validate if this rejoiningPlayerId is valid for this gameId
-            newSocket.emit('join-game', { gameId, playerCount: playerCountParam, rejoiningPlayerId: rejoiningPlayerId });
+            // Send rejoiningPlayerId if it exists from localStorage
+            newSocket.emit('join-game', { gameId, playerCount: playerCountParam, rejoiningPlayerId: activePlayerIdFromStorage });
           }
         });
 
@@ -79,9 +67,8 @@ export default function MultiplayerSecretSetupPage() {
             
             const storedSecret = localStorage.getItem(`mySecret_${gameId}_${data.playerId}`);
             if(storedSecret) {
-                // If secret was already in localStorage for this player & game, reflect that
-                setHasSubmittedSecret(true);
                 setCurrentDigits(JSON.parse(storedSecret));
+                // Note: hasSubmittedSecret is now derived from gameRoomState
             }
             toast({ title: "You are " + data.playerId, description: `Joined game room: ${gameId}` });
           }
@@ -90,76 +77,32 @@ export default function MultiplayerSecretSetupPage() {
         newSocket.on('game-state-update', (serverGameState: ServerGameRoom) => { 
             if (serverGameState.gameId === gameId) {
                 console.log('Received game-state-update in secret setup:', serverGameState);
+                setGameRoomState(serverGameState);
                 
-                const currentPlayers = Object.values(serverGameState.players || {}).filter(p => p.socketId);
-                setActualPlayersInGame(currentPlayers.length);
-                setExpectedPlayerCount(serverGameState.playerCount);
-                
-                const secretsSetCount = currentPlayers.filter(p => p.hasSetSecret).length;
-                setSecretsActuallySet(secretsSetCount);
-
-
-                if (myPlayerId && serverGameState.players && serverGameState.players[myPlayerId]?.hasSetSecret) {
-                    setHasSubmittedSecret(true);
-                } else if (myPlayerId && serverGameState.players && !serverGameState.players[myPlayerId]?.hasSetSecret) {
-                    // This can happen if server state resets or player rejoined without local secret state
-                    // Forcing submission again if server says secret not set.
-                    // setHasSubmittedSecret(false); 
-                    // Re-evaluate if this line above is needed, might cause UI flicker if server is slow to confirm secret.
-                }
-                
-                if (currentPlayers.length === serverGameState.playerCount && serverGameState.status !== 'WAITING_FOR_PLAYERS') {
-                    setAllPlayersJoined(true);
-                } else {
-                    setAllPlayersJoined(false);
-                }
-
                 if(serverGameState.status === 'IN_PROGRESS' || serverGameState.status === 'GAME_OVER') {
                     router.push(`/multiplayer-play?gameId=${gameId}&playerCount=${playerCountParam}`);
                 }
             }
         });
 
-
-        newSocket.on('player-joined', (data: {playerId: string, playersInRoom: number, totalPlayerCapacity: number}) => { 
-           console.log('Player joined event:', data);
-           setActualPlayersInGame(data.playersInRoom);
-           setExpectedPlayerCount(data.totalPlayerCapacity);
-           if (data.playersInRoom === data.totalPlayerCapacity) {
-             setAllPlayersJoined(true);
-           }
-            if (data.playerId !== myPlayerId) { 
-                toast({ description: `${data.playerId} joined. ${data.playersInRoom}/${data.totalPlayerCapacity} players.` });
-            }
-        });
-        
-        newSocket.on('all-players-joined', (data: { gameId: string }) => {
-          if (data.gameId === gameId) {
-            console.log('All players have joined the game:', gameId);
-            setAllPlayersJoined(true);
-            toast({ title: "Ready to Set Secrets!", description: "All players have joined." });
-          }
-        });
-
-        newSocket.on('secret-update', (data: { playerId: string; secretSet: boolean; secretsCurrentlySet: number; totalPlayers: number }) => {
-          console.log('Secret update received:', data);
-          setSecretsActuallySet(data.secretsCurrentlySet);
-          setExpectedPlayerCount(data.totalPlayers);
-          if (data.playerId === myPlayerId && data.secretSet) {
-            setHasSubmittedSecret(true);
-            setIsSubmittingSecret(false); // Ensure button is re-enabled after confirmation
-          }
-          if (data.playerId !== myPlayerId) {
-            toast({ title: "Opponent Update", description: `${data.playerId} has set their secret. (${data.secretsCurrentlySet}/${data.totalPlayers})` });
-          }
-        });
-
         newSocket.on('game-start', (data: { gameId: string; startingPlayer: string; targetMap: any }) => {
           if (data.gameId === gameId) {
             console.log('Game starting!', data);
             toast({ title: "Game Starting!", description: `${data.startingPlayer} will go first.` });
+            // Clear local secret storage upon game start to ensure fresh setup next time
+            if(myPlayerId) localStorage.removeItem(`mySecret_${gameId}_${myPlayerId}`);
             router.push(`/multiplayer-play?gameId=${gameId}&playerCount=${playerCountParam}`);
           }
+        });
+        
+        newSocket.on('error-event', (data: { message: string }) => {
+            console.error('Server error:', data.message);
+            toast({ title: "Error", description: data.message, variant: "destructive" });
+            if (data.message.toLowerCase().includes("full")) {
+                setConnectionStatus("room_full");
+            } else {
+                setConnectionStatus("error");
+            }
         });
 
         newSocket.on('disconnect', (reason) => {
@@ -174,16 +117,6 @@ export default function MultiplayerSecretSetupPage() {
           toast({ title: "Connection Error", description: `Failed to connect: ${err.message}`, variant: "destructive" });
         });
         
-        newSocket.on('error-event', (data: { message: string }) => {
-            console.error('Server error:', data.message);
-            toast({ title: "Error", description: data.message, variant: "destructive" });
-            if (data.message.toLowerCase().includes("full")) {
-                setConnectionStatus("room_full");
-            } else {
-                setConnectionStatus("error");
-            }
-        });
-        
         return () => {
           if (newSocket) {
             console.log('Disconnecting socket from secret setup...');
@@ -196,8 +129,7 @@ export default function MultiplayerSecretSetupPage() {
         setConnectionStatus("failed");
         toast({ title: "Connection Setup Failed", description: "Could not contact the game server.", variant: "destructive" });
       });
-  // eslint-disable-next-line react-hooks/exhaustive-deps 
-  }, [gameId, playerCountParam, router]); // Removed toast from deps as it's stable
+  }, [gameId, playerCountParam, router, toast, myPlayerId]);
 
 
   const handleSecretSubmit = async () => {
@@ -215,14 +147,20 @@ export default function MultiplayerSecretSetupPage() {
     }
 
     setIsSubmittingSecret(true);
-    // Client sends its 'myPlayerId' along with the secret. Server will verify.
     socket.emit('send-secret', { gameId, playerId: myPlayerId, secret: currentDigits });
-    localStorage.setItem(`mySecret_${gameId}_${myPlayerId}`, JSON.stringify(currentDigits));
-    
-    // UI updates to 'hasSubmittedSecret' will primarily be driven by 'secret-update' or 'game-state-update' from server
+    localStorage.setItem(`mySecret_${gameId}_${myPlayerId}`, JSON.stringify(currentDigits)); // Store for potential rejoin before game start
+    // UI updates to 'isReady' driven by 'game-state-update' from server
     // toast({ title: `Your Secret Sent!`, description: "Waiting for server confirmation and other players..." });
+    // No need to call setIsSubmittingSecret(false) here, as the button will be disabled/hidden by game state change.
   };
 
+  const handleStartGame = () => {
+    if (!socket || !myPlayerId || myPlayerId !== "player1" || !gameId || gameRoomState?.status !== 'READY_TO_START') {
+      toast({ title: "Cannot Start Game", description: "Not host or game not ready.", variant: "destructive" });
+      return;
+    }
+    socket.emit('request-start-game', { gameId });
+  };
 
   if (!gameId || !playerCountParam ) {
     return (
@@ -238,21 +176,27 @@ export default function MultiplayerSecretSetupPage() {
     );
   }
   
-  if (connectionStatus === "connecting") {
+  if (connectionStatus === "connecting" || (!myPlayerId && connectionStatus === "connected") || !gameRoomState) {
      return (
       <div className="flex flex-col items-center justify-center min-h-[calc(100vh-200px)] py-8">
         <Card className="w-full max-w-lg mx-auto shadow-xl">
           <CardHeader className="text-center">
             <CardTitle className="text-3xl text-primary flex items-center justify-center">
-              <Loader2 className="mr-3 h-8 w-8 animate-spin" /> Connecting...
+              <Loader2 className="mr-3 h-8 w-8 animate-spin" /> 
+              {connectionStatus === "connecting" ? "Connecting..." : (connectionStatus === "connected" && !myPlayerId) ? "Assigning Player ID..." : "Loading Game Info..."}
             </CardTitle>
-            <CardDescription className="pt-2">Establishing connection to the game server.</CardDescription>
+            <CardDescription className="pt-2">
+                {connectionStatus === "connecting" && "Establishing connection to the game server."}
+                {connectionStatus !== "connecting" && "Fetching game details and player status."}
+            </CardDescription>
           </CardHeader>
         </Card>
       </div>
     );
   }
+
   if (connectionStatus === "failed" || connectionStatus === "error" || connectionStatus === "room_full") {
+    // UI for failed/error/room_full remains the same
      return (
       <div className="flex flex-col items-center justify-center min-h-[calc(100vh-200px)] py-8">
         <Card className="w-full max-w-lg mx-auto shadow-xl">
@@ -274,16 +218,22 @@ export default function MultiplayerSecretSetupPage() {
     );
   }
 
+  const localPlayerIsReady = !!(myPlayerId && gameRoomState.players[myPlayerId]?.isReady);
+  const numberOfActivePlayers = gameRoomState.players ? Object.values(gameRoomState.players).filter(p => p.socketId).length : 0;
+
   const getWaitingMessage = () => {
-    if (!myPlayerId) return "Assigning your player ID...";
-    if (!allPlayersJoined || actualPlayersInGame < expectedPlayerCount) {
-        return `Waiting for players... (${actualPlayersInGame > 0 ? actualPlayersInGame : '?'}/${expectedPlayerCount > 0 ? expectedPlayerCount : '?'})`;
+    if (gameRoomState.status === 'WAITING_FOR_PLAYERS') {
+      return `Waiting for players... (${numberOfActivePlayers}/${expectedPlayerCount})`;
     }
-    if (secretsActuallySet < expectedPlayerCount) { 
-        return `Waiting for secrets... (${secretsActuallySet}/${expectedPlayerCount})`;
+    if (gameRoomState.status === 'WAITING_FOR_READY') {
+      const readyCount = gameRoomState.players ? Object.values(gameRoomState.players).filter(p => p.isReady && p.socketId).length : 0;
+      return `Waiting for players to set secrets... (${readyCount}/${numberOfActivePlayers} ready)`;
     }
-    return "All secrets set. Starting game soon...";
-  }
+    if (gameRoomState.status === 'READY_TO_START') {
+      return myPlayerId === "player1" ? "All players ready. You can start the game!" : "All players ready. Waiting for host to start.";
+    }
+    return "Loading status...";
+  };
 
 
   return (
@@ -292,21 +242,21 @@ export default function MultiplayerSecretSetupPage() {
         <CardHeader className="text-center">
           <CardTitle className="text-3xl text-primary flex items-center justify-center">
             {myPlayerId ? <UserCheck className="mr-3 h-8 w-8" /> : <LockKeyhole className="mr-3 h-8 w-8" />}
-            {myPlayerId ? `You are ${myPlayerId}` : "Connecting..."}
+            {myPlayerId ? `You are ${myPlayerId}` : "Assigning ID..."}
           </CardTitle>
           <CardDescription className="pt-2">
             Game ID: <span className="font-mono text-sm text-accent">{gameId}</span> ({playerCountParam}) <br/>
-            {!hasSubmittedSecret && myPlayerId && allPlayersJoined &&
+            {!localPlayerIsReady && myPlayerId && (gameRoomState.status === 'WAITING_FOR_READY' || gameRoomState.status === 'READY_TO_START' || (gameRoomState.status === 'WAITING_FOR_PLAYERS' && numberOfActivePlayers === expectedPlayerCount )) &&
               `Enter a ${CODE_LENGTH}-digit number. No 3 or 4 identical consecutive digits.`
             }
-            {(hasSubmittedSecret || !allPlayersJoined || !myPlayerId || (allPlayersJoined && secretsActuallySet < expectedPlayerCount)) &&
-                <span className="flex items-center justify-center mt-2"><Hourglass className="mr-2 h-4 w-4 animate-spin" /> {getWaitingMessage()}</span>
-            }
-             {!myPlayerId && connectionStatus === "connected" && <span className="flex items-center justify-center mt-2"><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Waiting for player assignment...</span>}
+            <span className="flex items-center justify-center mt-2">
+                {(gameRoomState.status !== 'READY_TO_START' && gameRoomState.status !== 'IN_PROGRESS') && <Hourglass className="mr-2 h-4 w-4 animate-spin" />}
+                {getWaitingMessage()}
+            </span>
           </CardDescription>
         </CardHeader>
-        <CardContent>
-          {myPlayerId && allPlayersJoined && !hasSubmittedSecret && (
+        <CardContent className="space-y-4">
+          {myPlayerId && !localPlayerIsReady && (gameRoomState.status === 'WAITING_FOR_READY' || gameRoomState.status === 'READY_TO_START' || (gameRoomState.status === 'WAITING_FOR_PLAYERS' && numberOfActivePlayers === expectedPlayerCount )) && (
             <div className="space-y-6">
               <DigitInput
                 count={CODE_LENGTH}
@@ -315,19 +265,50 @@ export default function MultiplayerSecretSetupPage() {
                 disabled={isSubmittingSecret}
                 ariaLabel={`Secret digit for ${myPlayerId}`}
               />
-              <Button onClick={handleSecretSubmit} className="w-full" disabled={isSubmittingSecret} size="lg">
-                {isSubmittingSecret ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Submitting...</> : `Confirm ${myPlayerId}'s Secret`}
+              <Button onClick={handleSecretSubmit} className="w-full" disabled={isSubmittingSecret || localPlayerIsReady} size="lg">
+                {isSubmittingSecret ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Submitting...</> : `Confirm Secret & Ready Up`}
               </Button>
             </div>
           )}
-          {hasSubmittedSecret && (
-             <p className="text-center text-lg text-green-500">Your secret is locked in! Waiting for others or game start.</p>
+          {localPlayerIsReady && (
+             <p className="text-center text-lg text-green-500">Your secret is locked in! You are ready.</p>
           )}
+
+          <div className="mt-6 border-t pt-4">
+            <h4 className="text-lg font-semibold mb-2 text-center">Players in Room ({numberOfActivePlayers}/{expectedPlayerCount})</h4>
+            <ul className="space-y-2">
+              {gameRoomState.players && Object.entries(gameRoomState.players).map(([pId, playerData]) => {
+                if (!playerData.socketId && pId !== myPlayerId) return null; // Don't show disconnected players unless it's me (to see my own status if I disconnected briefly)
+                return (
+                  <li key={pId} className={`flex justify-between items-center p-3 rounded-md ${playerData.socketId ? 'bg-card' : 'bg-muted/50 opacity-60'}`}>
+                    <span className="font-semibold">{pId === myPlayerId ? `${pId} (You)` : pId}</span>
+                    {playerData.socketId ? (
+                        playerData.isReady ? 
+                        <span className="text-green-400 flex items-center"><ShieldCheck className="mr-1 h-5 w-5"/>Ready</span> : 
+                        <span className="text-yellow-400 flex items-center"><ShieldAlert className="mr-1 h-5 w-5"/>Setting Secret...</span>
+                    ) : (
+                        <span className="text-red-500">Disconnected</span>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+
+          {myPlayerId === "player1" && gameRoomState.status === 'READY_TO_START' && (
+            <Button onClick={handleStartGame} className="w-full mt-6" size="lg">
+              <Play className="mr-2 h-5 w-5" /> Start Game
+            </Button>
+          )}
+
         </CardContent>
          <CardFooter className="flex flex-col items-center">
-            <p className="text-xs text-muted-foreground">Players: {actualPlayersInGame}/{expectedPlayerCount > 0 ? expectedPlayerCount : (playerCountParam === "duo" ? 2 : playerCountParam === "trio" ? 3 : 4)} | Secrets Set: {secretsActuallySet}</p>
+            <p className="text-xs text-muted-foreground">
+                Status: {gameRoomState.status}
+            </p>
          </CardFooter>
       </Card>
     </div>
   );
 }
+
