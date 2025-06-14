@@ -17,7 +17,6 @@ export default function MultiplayerSecretSetupPage() {
   const searchParams = useSearchParams();
   const { toast } = useToast();
 
-  // Null check for searchParams
   const gameId = searchParams ? searchParams.get('gameId') : null;
   const playerCountParam = searchParams ? searchParams.get('playerCount') : null;
   
@@ -27,7 +26,7 @@ export default function MultiplayerSecretSetupPage() {
   const [hasSubmittedSecret, setHasSubmittedSecret] = useState(false);
   const [socket, setSocket] = useState<ClientSocket | null>(null);
   const [allPlayersJoined, setAllPlayersJoined] = useState(false);
-  const [secretsCurrentlySet, setSecretsCurrentlySet] = useState(0);
+  const [secretsActuallySet, setSecretsActuallySet] = useState(0); // Renamed from secretsCurrentlySet
   const [actualPlayersInGame, setActualPlayersInGame] = useState(0);
   const [expectedPlayerCount, setExpectedPlayerCount] = useState(0); 
   const [connectionStatus, setConnectionStatus] = useState<"connecting" | "connected" | "failed" | "room_full" | "error">("connecting");
@@ -66,14 +65,8 @@ export default function MultiplayerSecretSetupPage() {
           setConnectionStatus("connected");
           if (gameId && playerCountParam) {
             const rejoiningPlayerId = localStorage.getItem('myPlayerId_activeGame');
-            const storedGameIdForPlayer = rejoiningPlayerId ? localStorage.getItem(`activeGameId_${rejoiningPlayerId}`) : null;
-            if (rejoiningPlayerId && storedGameIdForPlayer === gameId) {
-                 newSocket.emit('join-game', { gameId, playerCount: playerCountParam, rejoiningPlayerId: rejoiningPlayerId });
-            } else {
-                localStorage.removeItem('myPlayerId_activeGame');
-                if (rejoiningPlayerId) localStorage.removeItem(`activeGameId_${rejoiningPlayerId}`); 
-                newSocket.emit('join-game', { gameId, playerCount: playerCountParam });
-            }
+            // Server will validate if this rejoiningPlayerId is valid for this gameId
+            newSocket.emit('join-game', { gameId, playerCount: playerCountParam, rejoiningPlayerId: rejoiningPlayerId });
           }
         });
 
@@ -86,6 +79,7 @@ export default function MultiplayerSecretSetupPage() {
             
             const storedSecret = localStorage.getItem(`mySecret_${gameId}_${data.playerId}`);
             if(storedSecret) {
+                // If secret was already in localStorage for this player & game, reflect that
                 setHasSubmittedSecret(true);
                 setCurrentDigits(JSON.parse(storedSecret));
             }
@@ -96,14 +90,25 @@ export default function MultiplayerSecretSetupPage() {
         newSocket.on('game-state-update', (serverGameState: ServerGameRoom) => { 
             if (serverGameState.gameId === gameId) {
                 console.log('Received game-state-update in secret setup:', serverGameState);
-                if (myPlayerId && serverGameState.players[myPlayerId]?.secret?.length) {
-                    setHasSubmittedSecret(true);
-                }
-                setSecretsCurrentlySet(serverGameState.secretsSetCount);
-                setActualPlayersInGame(Object.keys(serverGameState.players).length);
-                setExpectedPlayerCount(serverGameState.playerCount); 
                 
-                if (Object.keys(serverGameState.players).length === serverGameState.playerCount && Object.values(serverGameState.players).every(p => p.socketId)) {
+                const currentPlayers = Object.values(serverGameState.players || {}).filter(p => p.socketId);
+                setActualPlayersInGame(currentPlayers.length);
+                setExpectedPlayerCount(serverGameState.playerCount);
+                
+                const secretsSetCount = currentPlayers.filter(p => p.hasSetSecret).length;
+                setSecretsActuallySet(secretsSetCount);
+
+
+                if (myPlayerId && serverGameState.players && serverGameState.players[myPlayerId]?.hasSetSecret) {
+                    setHasSubmittedSecret(true);
+                } else if (myPlayerId && serverGameState.players && !serverGameState.players[myPlayerId]?.hasSetSecret) {
+                    // This can happen if server state resets or player rejoined without local secret state
+                    // Forcing submission again if server says secret not set.
+                    // setHasSubmittedSecret(false); 
+                    // Re-evaluate if this line above is needed, might cause UI flicker if server is slow to confirm secret.
+                }
+                
+                if (currentPlayers.length === serverGameState.playerCount && serverGameState.status !== 'WAITING_FOR_PLAYERS') {
                     setAllPlayersJoined(true);
                 } else {
                     setAllPlayersJoined(false);
@@ -138,10 +143,11 @@ export default function MultiplayerSecretSetupPage() {
 
         newSocket.on('secret-update', (data: { playerId: string; secretSet: boolean; secretsCurrentlySet: number; totalPlayers: number }) => {
           console.log('Secret update received:', data);
-          setSecretsCurrentlySet(data.secretsCurrentlySet);
+          setSecretsActuallySet(data.secretsCurrentlySet);
           setExpectedPlayerCount(data.totalPlayers);
           if (data.playerId === myPlayerId && data.secretSet) {
             setHasSubmittedSecret(true);
+            setIsSubmittingSecret(false); // Ensure button is re-enabled after confirmation
           }
           if (data.playerId !== myPlayerId) {
             toast({ title: "Opponent Update", description: `${data.playerId} has set their secret. (${data.secretsCurrentlySet}/${data.totalPlayers})` });
@@ -191,7 +197,7 @@ export default function MultiplayerSecretSetupPage() {
         toast({ title: "Connection Setup Failed", description: "Could not contact the game server.", variant: "destructive" });
       });
   // eslint-disable-next-line react-hooks/exhaustive-deps 
-  }, [gameId, playerCountParam, toast, router]); 
+  }, [gameId, playerCountParam, router]); // Removed toast from deps as it's stable
 
 
   const handleSecretSubmit = async () => {
@@ -209,10 +215,12 @@ export default function MultiplayerSecretSetupPage() {
     }
 
     setIsSubmittingSecret(true);
+    // Client sends its 'myPlayerId' along with the secret. Server will verify.
     socket.emit('send-secret', { gameId, playerId: myPlayerId, secret: currentDigits });
     localStorage.setItem(`mySecret_${gameId}_${myPlayerId}`, JSON.stringify(currentDigits));
     
-    toast({ title: `Your Secret Sent!`, description: "Waiting for server confirmation and other players..." });
+    // UI updates to 'hasSubmittedSecret' will primarily be driven by 'secret-update' or 'game-state-update' from server
+    // toast({ title: `Your Secret Sent!`, description: "Waiting for server confirmation and other players..." });
   };
 
 
@@ -271,8 +279,8 @@ export default function MultiplayerSecretSetupPage() {
     if (!allPlayersJoined || actualPlayersInGame < expectedPlayerCount) {
         return `Waiting for players... (${actualPlayersInGame > 0 ? actualPlayersInGame : '?'}/${expectedPlayerCount > 0 ? expectedPlayerCount : '?'})`;
     }
-    if (secretsCurrentlySet < expectedPlayerCount) { 
-        return `Waiting for secrets... (${secretsCurrentlySet}/${expectedPlayerCount})`;
+    if (secretsActuallySet < expectedPlayerCount) { 
+        return `Waiting for secrets... (${secretsActuallySet}/${expectedPlayerCount})`;
     }
     return "All secrets set. Starting game soon...";
   }
@@ -291,7 +299,7 @@ export default function MultiplayerSecretSetupPage() {
             {!hasSubmittedSecret && myPlayerId && allPlayersJoined &&
               `Enter a ${CODE_LENGTH}-digit number. No 3 or 4 identical consecutive digits.`
             }
-            {(hasSubmittedSecret || !allPlayersJoined || !myPlayerId || (allPlayersJoined && secretsCurrentlySet < expectedPlayerCount)) &&
+            {(hasSubmittedSecret || !allPlayersJoined || !myPlayerId || (allPlayersJoined && secretsActuallySet < expectedPlayerCount)) &&
                 <span className="flex items-center justify-center mt-2"><Hourglass className="mr-2 h-4 w-4 animate-spin" /> {getWaitingMessage()}</span>
             }
              {!myPlayerId && connectionStatus === "connected" && <span className="flex items-center justify-center mt-2"><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Waiting for player assignment...</span>}
@@ -317,10 +325,9 @@ export default function MultiplayerSecretSetupPage() {
           )}
         </CardContent>
          <CardFooter className="flex flex-col items-center">
-            <p className="text-xs text-muted-foreground">Players: {actualPlayersInGame}/{expectedPlayerCount > 0 ? expectedPlayerCount : (playerCountParam === "duo" ? 2 : playerCountParam === "trio" ? 3 : 4)} | Secrets Set: {secretsCurrentlySet}</p>
+            <p className="text-xs text-muted-foreground">Players: {actualPlayersInGame}/{expectedPlayerCount > 0 ? expectedPlayerCount : (playerCountParam === "duo" ? 2 : playerCountParam === "trio" ? 3 : 4)} | Secrets Set: {secretsActuallySet}</p>
          </CardFooter>
       </Card>
     </div>
   );
 }
-

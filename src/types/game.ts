@@ -23,6 +23,7 @@ export interface PlayerData {
   secret?: string[];
   guessesMade?: Guess[]; // Guesses this player made against their target
   guessesAgainst?: Guess[]; // Guesses made by others against this player's secret
+  hasSetSecret?: boolean; // True if this player has submitted their secret
 }
 
 export interface GameRoom {
@@ -33,7 +34,8 @@ export interface GameRoom {
   turn?: string; // playerId whose turn it is
   targetMap?: { [playerId: string]: string }; // Who guesses whom, e.g., player1 targets player2
   winner?: string; // playerId of the winner
-  secretsSetCount: number;
+  // secretsSetCount: number; // Replaced by checking hasSetSecret on all players
+  createdAt?: Date; // For TTL index
 }
 
 // Structure for the in-memory store on the server
