@@ -36,12 +36,26 @@ export default function MultiplayerSecretSetupPage() {
         return;
     }
 
-    if (socketRef.current) return; // Initialize socket only once
+    // Initialize socket only once
+    if (socketRef.current) {
+        console.log(`[MultiplayerSecretSetup] useEffect for game ${gameId}: Socket already exists (ID: ${socketRef.current.id}), skipping re-initialization.`);
+        // If socket exists but not connected, try to connect (e.g. after navigating back)
+        if (!socketRef.current.connected) {
+            console.log(`[MultiplayerSecretSetup] Socket ${socketRef.current.id} exists but not connected. Attempting to connect.`);
+            socketRef.current.connect();
+        }
+        return;
+    }
+    console.log(`[MultiplayerSecretSetup] useEffect: Initializing new socket for game ${gameId}.`);
+
 
     const rejoiningPlayerIdFromStorage = localStorage.getItem('myPlayerId_activeGame');
     const gameIdForRejoiningPlayer = rejoiningPlayerIdFromStorage ? localStorage.getItem(`activeGameId_${rejoiningPlayerIdFromStorage}`) : null;
     
     const validRejoiningPlayerId = (rejoiningPlayerIdFromStorage && gameIdForRejoiningPlayer === gameId) ? rejoiningPlayerIdFromStorage : null;
+    console.log(`[MultiplayerSecretSetup] GameID: ${gameId}. PlayerCountParam: ${playerCountParam}.`);
+    console.log(`[MultiplayerSecretSetup] Reading from localStorage: storedPlayerId='${rejoiningPlayerIdFromStorage}', gameIdForStoredPlayer='${gameIdForRejoiningPlayer}'. Valid rejoiningPlayerId for emit: '${validRejoiningPlayerId}'`);
+
 
     fetch('/api/socketio', { method: 'POST' }) 
       .then((res) => {
@@ -51,34 +65,39 @@ export default function MultiplayerSecretSetupPage() {
       .then(() => {
         const newSocket = io({ path: '/api/socketio_c', addTrailingSlash: false, transports: ['websocket'] }); 
         socketRef.current = newSocket;
+        console.log(`[MultiplayerSecretSetup] New socket instance created with provisional ID: ${newSocket.id} for game ${gameId}.`);
+
 
         newSocket.on('connect', () => {
-          console.log('Connected to Socket.IO server with ID:', newSocket.id);
+          console.log(`[MultiplayerSecretSetup] Socket connected with ID: ${newSocket.id} for game ${gameId}.`);
           setConnectionStatus("connected");
           if (gameId && playerCountParam) {
-            // Use validRejoiningPlayerId for the initial join attempt
-            console.log(`Emitting join-game with gameId: ${gameId}, playerCount: ${playerCountParam}, rejoiningPlayerId: ${validRejoiningPlayerId || 'NONE'}`);
+            console.log(`[MultiplayerSecretSetup] Emitting 'join-game' for game ${gameId}. RejoiningPlayerId: '${validRejoiningPlayerId || 'NONE'}'`);
             newSocket.emit('join-game', { gameId, playerCount: playerCountParam, rejoiningPlayerId: validRejoiningPlayerId });
           }
         });
 
         newSocket.on('player-assigned', (data: { playerId: string; gameId: string }) => {
           if (data.gameId === gameId) {
-            console.log(`MultiplayerSecretSetup: Assigned as ${data.playerId} for game ${gameId}. Updating myPlayerId state.`);
+            console.log(`[MultiplayerSecretSetup] Received 'player-assigned' for game ${gameId}. Server assigned PlayerID: ${data.playerId}. Current 'myPlayerId' state before update: ${myPlayerId}`);
             setMyPlayerId(data.playerId); 
             localStorage.setItem('myPlayerId_activeGame', data.playerId); 
             localStorage.setItem(`activeGameId_${data.playerId}`, gameId); 
+            console.log(`[MultiplayerSecretSetup] 'myPlayerId' state updated to: ${data.playerId}. LocalStorage updated.`);
             
             const storedSecret = localStorage.getItem(`mySecret_${gameId}_${data.playerId}`);
             if(storedSecret) {
                 setCurrentDigits(JSON.parse(storedSecret));
             }
             toast({ title: "You are " + data.playerId, description: `Joined game room: ${gameId}` });
+          } else {
+            console.warn(`[MultiplayerSecretSetup] Received 'player-assigned' for a different game: ${data.gameId}. Current game: ${gameId}. Ignoring.`);
           }
         });
         
         newSocket.on('game-state-update', (serverGameState: ServerGameRoom) => { 
             if (serverGameState.gameId === gameId) {
+                console.log(`[MultiplayerSecretSetup] Received 'game-state-update' for game ${gameId}:`, serverGameState);
                 setGameRoomState(serverGameState);
                 if(serverGameState.status === 'IN_PROGRESS' || serverGameState.status === 'GAME_OVER') {
                     // Check if current player is part of this game session before redirecting
@@ -87,19 +106,25 @@ export default function MultiplayerSecretSetupPage() {
                          router.push(`/multiplayer-play?gameId=${gameId}&playerCount=${playerCountParam}`);
                     }
                 }
+            } else {
+                 console.warn(`[MultiplayerSecretSetup] Received 'game-state-update' for a different game: ${serverGameState.gameId}. Current game: ${gameId}. Ignoring.`);
             }
         });
 
         newSocket.on('game-start', (data: { gameId: string; startingPlayer: string; targetMap: any }) => {
           if (data.gameId === gameId) {
+            console.log(`[MultiplayerSecretSetup] Received 'game-start' for game ${gameId}. Starting player: ${data.startingPlayer}. Redirecting to play page.`);
             toast({ title: "Game Starting!", description: `${data.startingPlayer} will go first.` });
             // Clear only my secret upon game start if myPlayerId is set
             if(myPlayerId) localStorage.removeItem(`mySecret_${gameId}_${myPlayerId}`);
             router.push(`/multiplayer-play?gameId=${gameId}&playerCount=${playerCountParam}`);
+          } else {
+            console.warn(`[MultiplayerSecretSetup] Received 'game-start' for a different game: ${data.gameId}. Current game: ${gameId}. Ignoring.`);
           }
         });
         
         newSocket.on('error-event', (data: { message: string }) => {
+            console.error(`[MultiplayerSecretSetup] Received 'error-event' for game ${gameId}: ${data.message}`);
             toast({ title: "Error", description: data.message, variant: "destructive" });
             if (data.message.toLowerCase().includes("full") || data.message.toLowerCase().includes("slot already active")) {
                 setConnectionStatus("room_full");
@@ -109,30 +134,32 @@ export default function MultiplayerSecretSetupPage() {
         });
 
         newSocket.on('disconnect', (reason) => {
+          console.log(`[MultiplayerSecretSetup] Socket disconnected from game ${gameId}. Reason: ${reason}`);
           setConnectionStatus("failed");
           toast({ title: "Disconnected", description: `Reason: ${reason}`, variant: "destructive" });
         });
 
         newSocket.on('connect_error', (err) => {
+          console.error(`[MultiplayerSecretSetup] Socket connection error for game ${gameId}: ${err.message}`, err);
           setConnectionStatus("failed");
           toast({ title: "Connection Error", description: `Failed to connect: ${err.message}`, variant: "destructive" });
         });
         
       })
       .catch(error => {
+        console.error(`[MultiplayerSecretSetup] Error in fetch/socket setup for game ${gameId}:`, error);
         setConnectionStatus("failed");
         toast({ title: "Connection Setup Failed", description: "Could not contact the game server.", variant: "destructive" });
       });
 
     return () => {
       if (socketRef.current) {
+        console.log(`[MultiplayerSecretSetup] useEffect cleanup: Disconnecting socket ${socketRef.current.id} for game ${gameId}.`);
         socketRef.current.disconnect();
-        socketRef.current = null;
+        socketRef.current = null; 
       }
     };
-  // Dependency array updated: myPlayerId removed.
-  // Router, toast, gameId, playerCountParam are props/stable values that define the context of this setup.
-  }, [gameId, playerCountParam, router, toast]); 
+  }, [gameId, playerCountParam, router, toast]); // myPlayerId is intentionally NOT in the dependency array
 
 
   const handleSecretSubmit = async () => {
@@ -150,8 +177,11 @@ export default function MultiplayerSecretSetupPage() {
     }
 
     setIsSubmittingSecret(true);
+    console.log(`[MultiplayerSecretSetup] Emitting 'send-secret'. GameID: ${gameId}, PlayerID: ${myPlayerId}, Secret: ${currentDigits.join('')}`);
     socketRef.current.emit('send-secret', { gameId, playerId: myPlayerId, secret: currentDigits });
     localStorage.setItem(`mySecret_${gameId}_${myPlayerId}`, JSON.stringify(currentDigits)); 
+    // Server will send game-state-update, no need to optimistically update UI fully here beyond isSubmitting
+    // setIsSubmittingSecret(false) will be handled by game-state-update implicitly or if needed, explicitly after server ack.
   };
 
   const handleStartGame = () => {
@@ -159,6 +189,7 @@ export default function MultiplayerSecretSetupPage() {
       toast({ title: "Cannot Start Game", description: "Not host or game not ready.", variant: "destructive" });
       return;
     }
+    console.log(`[MultiplayerSecretSetup] Emitting 'request-start-game'. GameID: ${gameId}, PlayerID (Host): ${myPlayerId}`);
     socketRef.current.emit('request-start-game', { gameId });
   };
 
@@ -176,7 +207,6 @@ export default function MultiplayerSecretSetupPage() {
     );
   }
   
-  // Initial loading states
   if (connectionStatus === "connecting" || (connectionStatus === "connected" && !myPlayerId && (!gameRoomState || gameRoomState.status === 'WAITING_FOR_PLAYERS')) ) {
      return (
       <div className="flex flex-col items-center justify-center min-h-[calc(100vh-200px)] py-8">
@@ -244,6 +274,7 @@ export default function MultiplayerSecretSetupPage() {
   const localPlayerIsReady = !!(localPlayerServerData && localPlayerServerData.isReady);
   const numberOfActivePlayers = gameRoomState.players ? Object.values(gameRoomState.players).filter(p => p.socketId).length : 0;
 
+
   const getWaitingMessage = () => {
     if (!gameRoomState) return "Loading room details...";
     if (gameRoomState.status === 'WAITING_FOR_PLAYERS') {
@@ -307,7 +338,6 @@ export default function MultiplayerSecretSetupPage() {
             <h4 className="text-lg font-semibold mb-2 text-center">Players in Room ({numberOfActivePlayers}/{expectedPlayerCount})</h4>
             <ul className="space-y-2">
               {gameRoomState.players && Object.entries(gameRoomState.players).map(([pId, playerData]) => {
-                // Show player if they have a socketId or if they are the current client (myPlayerId) even if socketId is briefly undefined during connection.
                 if (!playerData.socketId && pId !== myPlayerId) return null; 
                 return (
                   <li key={pId} className={`flex justify-between items-center p-3 rounded-md ${playerData.socketId ? 'bg-card' : 'bg-muted/50 opacity-60'}`}>
@@ -317,7 +347,6 @@ export default function MultiplayerSecretSetupPage() {
                         <span className="text-green-400 flex items-center"><ShieldCheck className="mr-1 h-5 w-5"/>Ready</span> : 
                         <span className="text-yellow-400 flex items-center"><ShieldAlert className="mr-1 h-5 w-5"/>Setting Secret...</span>
                     ) : (
-                        // If it's myPlayerId but no socketId, it means we're connecting/reconnecting
                         pId === myPlayerId ? <span className="text-blue-400">Connecting...</span> : <span className="text-red-500">Disconnected</span>
                     )}
                   </li>
@@ -342,4 +371,7 @@ export default function MultiplayerSecretSetupPage() {
     </div>
   );
 }
-
+    
+    
+    
+    
