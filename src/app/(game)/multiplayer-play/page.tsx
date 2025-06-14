@@ -36,7 +36,7 @@ export default function MultiplayerPlayPage() {
   const { toast } = useToast();
 
   const gameId = searchParams ? searchParams.get('gameId') : null;
-  const playerCountParam = searchParams ? searchParams.get('playerCount') : "duo"; // Default to duo
+  const playerCountParam = searchParams ? searchParams.get('playerCount') : "duo"; 
 
   const [socket, setSocket] = useState<ClientSocket | null>(null);
   const [gameState, setGameState] = useState<MultiplayerGameState>({
@@ -57,51 +57,60 @@ export default function MultiplayerPlayPage() {
       return;
     }
 
+    // Read player ID and game ID from localStorage to ensure continuity
     const storedPlayerId = localStorage.getItem('myPlayerId_activeGame');
     const gameIdForStoredPlayer = storedPlayerId ? localStorage.getItem(`activeGameId_${storedPlayerId}`) : null;
 
     if (!storedPlayerId || gameIdForStoredPlayer !== gameId) {
-        toast({ title: "Error", description: "Player identity mismatch for this game session.", variant: "destructive" });
-        localStorage.removeItem('myPlayerId_activeGame'); 
-        if (storedPlayerId) localStorage.removeItem(`activeGameId_${storedPlayerId}`); 
+        toast({ title: "Error", description: "Player identity mismatch or session expired.", variant: "destructive" });
+        if (storedPlayerId) localStorage.removeItem(`activeGameId_${storedPlayerId}`);
+        localStorage.removeItem('myPlayerId_activeGame'); // Clear potentially stale ID
         router.push(`/multiplayer-setup`); 
         return;
     }
     
     const mySecretFromStorage = localStorage.getItem(`mySecret_${gameId}_${storedPlayerId}`);
+    if (!mySecretFromStorage) {
+        toast({ title: "Error", description: "Your secret code for this game was not found. Please setup again.", variant: "destructive" });
+        router.push(`/multiplayer-secret-setup?gameId=${gameId}&playerCount=${playerCountParam}`);
+        return;
+    }
 
     setGameState(prev => ({
         ...prev,
         myPlayerId: storedPlayerId,
-        mySecret: mySecretFromStorage ? JSON.parse(mySecretFromStorage) : Array(CODE_LENGTH).fill(''),
+        mySecret: JSON.parse(mySecretFromStorage), // My secret should be known
         gameStatus: 'WAITING_FOR_GAME_START' 
     }));
 
-    // Ensure API route for Socket.IO is hit to initialize server if not already.
-    // The actual connection happens via `io()` call.
     fetch('/api/socketio', { method: 'POST' }).then(() => { 
         const newSocket = io({ path: '/api/socketio_c', addTrailingSlash: false, transports: ['websocket'] }); 
         setSocket(newSocket);
 
         newSocket.on('connect', () => {
-            console.log(`MultiplayerPlay: Connected with socket ID ${newSocket.id}`);
+            console.log(`[MultiplayerPlay] Game ${gameId}: Connected with socket ID ${newSocket.id}`);
+            // Emit join-game with rejoiningPlayerId to re-establish session on server for this play page
             newSocket.emit('join-game', { gameId, playerCount: playerCountParam || "duo", rejoiningPlayerId: storedPlayerId });
-            toast({title: "Connected to Game", description: `Attempting to join Game ID: ${gameId}`});
+            toast({title: "Connected to Game", description: `Rejoining Game ID: ${gameId}`});
         });
         
         newSocket.on('game-state-update', (serverRoomState: ServerGameRoom) => {
-             console.log('Received game-state-update from server:', serverRoomState);
+             console.log(`[MultiplayerPlay] Game ${gameId}: Received 'game-state-update':`, serverRoomState);
              if (serverRoomState.gameId === gameId) {
                 const newPlayersData: MultiplayerGameState['playersData'] = {};
-                Object.keys(serverRoomState.players).forEach(pid => {
-                    const serverPlayer = serverRoomState.players[pid];
-                    newPlayersData[pid] = {
-                        socketId: serverPlayer.socketId,
-                        guessesMade: serverPlayer.guessesMade || [], 
-                        guessesAgainst: serverPlayer.guessesAgainst || [],
-                        displayName: pid 
-                    };
-                });
+                if (serverRoomState.players) {
+                    Object.keys(serverRoomState.players).forEach(pid => {
+                        const serverPlayer = serverRoomState.players[pid];
+                        newPlayersData[pid] = {
+                            socketId: serverPlayer.socketId,
+                            guessesMade: serverPlayer.guessesMade || [], 
+                            guessesAgainst: serverPlayer.guessesAgainst || [],
+                            displayName: pid, // Use playerId as displayName for now
+                            isReady: serverPlayer.isReady,
+                            hasSetSecret: serverPlayer.hasSetSecret,
+                        };
+                    });
+                }
 
                 setGameState(prev => ({
                     ...prev,
@@ -111,7 +120,7 @@ export default function MultiplayerPlayPage() {
                     playersData: newPlayersData,
                     gameStatus: serverRoomState.status === 'IN_PROGRESS' || serverRoomState.status === 'GAME_OVER' 
                                 ? serverRoomState.status 
-                                : (Object.keys(newPlayersData).length === serverRoomState.playerCount ? 'WAITING_FOR_GAME_START' : 'LOADING'), 
+                                : (Object.keys(newPlayersData).length === serverRoomState.playerCount && serverRoomState.status === 'WAITING_FOR_READY' ? 'WAITING_FOR_GAME_START' : 'LOADING'), // Simplified status mapping
                     winner: serverRoomState.winner || null,
                     targetMap: serverRoomState.targetMap || null,
                 }));
@@ -120,7 +129,7 @@ export default function MultiplayerPlayPage() {
 
         newSocket.on('game-start', (data: { gameId: string; startingPlayer: string; targetMap: { [playerId: string]: string } }) => {
             if (data.gameId === gameId) {
-                console.log('MultiplayerPlay: Game Start event received', data);
+                console.log(`[MultiplayerPlay] Game ${gameId}: Game Start event received`, data);
                 setGameState(prev => {
                     const initialPlayersData = { ...prev.playersData };
                     if (data.targetMap) {
@@ -144,7 +153,7 @@ export default function MultiplayerPlayPage() {
 
         newSocket.on('guess-feedback', (data: { gameId: string; guessingPlayerId: string; targetPlayerId: string; guess: Guess }) => {
             if (data.gameId === gameId) {
-                console.log('MultiplayerPlay: Guess Feedback event received', data);
+                console.log(`[MultiplayerPlay] Game ${gameId}: Guess Feedback event received`, data);
                 setGameState(prev => {
                     const newPlayersData = { ...prev.playersData };
                     
@@ -173,19 +182,19 @@ export default function MultiplayerPlayPage() {
 
         newSocket.on('turn-update', (data: { gameId: string; nextPlayerId: string }) => {
             if (data.gameId === gameId) {
-                console.log('MultiplayerPlay: Turn Update event received', data);
+                console.log(`[MultiplayerPlay] Game ${gameId}: Turn Update event received`, data);
                 setGameState(prev => ({ ...prev, currentTurnPlayerId: data.nextPlayerId }));
-                if (gameState.myPlayerId) { 
-                     toast({description: `It's ${data.nextPlayerId === gameState.myPlayerId ? 'Your' : data.nextPlayerId + "'s"} turn.`})
+                if (gameState.myPlayerId && data.nextPlayerId) { 
+                     toast({description: `It's ${data.nextPlayerId === gameState.myPlayerId ? 'Your' : (gameState.playersData[data.nextPlayerId]?.displayName || data.nextPlayerId) + "'s"} turn.`})
                 }
             }
         });
 
         newSocket.on('game-over', (data: { gameId: string; winner: string }) => {
             if (data.gameId === gameId) {
-                console.log('MultiplayerPlay: Game Over event received', data);
+                console.log(`[MultiplayerPlay] Game ${gameId}: Game Over event received`, data);
                 setGameState(prev => ({ ...prev, gameStatus: 'GAME_OVER', winner: data.winner }));
-                if (gameState.myPlayerId) { 
+                if (gameState.myPlayerId && data.winner) { 
                     toast({title: "Game Over!", description: `${data.winner === gameState.myPlayerId ? 'You are' : (gameState.playersData[data.winner]?.displayName || data.winner) + ' is'} the winner!`, duration: 5000});
                 }
             }
@@ -193,24 +202,24 @@ export default function MultiplayerPlayPage() {
         
         newSocket.on('error-event', (data: { message: string }) => {
             toast({ title: "Error", description: data.message, variant: "destructive" });
-            if (data.message.includes("full") || data.message.includes("No available player slot")) {
+            if (data.message.includes("full") || data.message.includes("No available player slot") || data.message.includes("slot already active")) {
                  router.push('/mode-select');
             }
         });
 
         newSocket.on('disconnect', (reason) => {
-          console.log('MultiplayerPlay: Disconnected from socket server', reason);
+          console.log(`[MultiplayerPlay] Game ${gameId}: Disconnected from socket server. Reason: ${reason}`);
           toast({ title: "Disconnected", variant: "destructive", description: `Reason: ${reason}. Please refresh or try rejoining.` });
           setGameState(prev => ({ ...prev, gameStatus: 'LOADING' })); 
         });
 
         return () => {
-            console.log('MultiplayerPlay: Disconnecting socket');
+            console.log(`[MultiplayerPlay] Game ${gameId}: Disconnecting socket ${newSocket.id}`);
             newSocket.disconnect();
         };
     });
-
-  }, [gameId, router, toast, playerCountParam, gameState.myPlayerId]); 
+  // gameState.myPlayerId removed from dep array to prevent loop if it's derived from localStorage initially
+  }, [gameId, router, toast, playerCountParam]); 
 
   const handleMakeGuess = (guessString: string) => {
     if (!socket || !gameId || !gameState.myPlayerId || gameState.currentTurnPlayerId !== gameState.myPlayerId || gameState.gameStatus !== 'IN_PROGRESS') {
@@ -223,6 +232,7 @@ export default function MultiplayerPlayPage() {
   };
 
   const handleExitGame = () => {
+    // Clear all game-specific localStorage for this player
     localStorage.removeItem('myPlayerId_activeGame');
     if (gameState.myPlayerId && gameId) {
       localStorage.removeItem(`mySecret_${gameId}_${gameState.myPlayerId}`);
@@ -233,6 +243,7 @@ export default function MultiplayerPlayPage() {
   };
   
   const handlePlayAgain = () => {
+    // Similar to exit, but routes to setup for a new game
     handleExitGame(); 
   }
 
@@ -258,16 +269,16 @@ export default function MultiplayerPlayPage() {
     );
   }
 
-  if (gameState.gameStatus === 'GAME_OVER') {
+  if (gameState.gameStatus === 'GAME_OVER' && gameState.winner) {
     return (
       <Card className="w-full max-w-md mx-auto text-center shadow-xl mt-10">
         <CardHeader>
           <Award className="mx-auto h-16 w-16 text-primary" />
           <CardTitle className="text-3xl mt-4">
-            {gameState.winner === gameState.myPlayerId ? "You Win!" : `${gameState.playersData[gameState.winner || '']?.displayName || gameState.winner || 'Someone'} Wins!`}
+            {gameState.winner === gameState.myPlayerId ? "You Win!" : `${gameState.playersData[gameState.winner]?.displayName || gameState.winner} Wins!`}
           </CardTitle>
           <CardDescription className="pt-2">
-            Congratulations to {gameState.playersData[gameState.winner || '']?.displayName || gameState.winner}!
+            Congratulations to {gameState.playersData[gameState.winner]?.displayName || gameState.winner}!
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -279,6 +290,8 @@ export default function MultiplayerPlayPage() {
   }
   
   const opponentId = gameState.myPlayerId && gameState.targetMap ? gameState.targetMap[gameState.myPlayerId] : null;
+  const myPlayerData = gameState.myPlayerId ? gameState.playersData[gameState.myPlayerId] : null;
+  const opponentPlayerData = opponentId ? gameState.playersData[opponentId] : null;
 
   return (
     <div className="space-y-6">
@@ -292,26 +305,26 @@ export default function MultiplayerPlayPage() {
       </div>
 
       <div className="flex flex-col md:flex-row gap-4 sm:gap-6">
-        {gameState.myPlayerId && gameState.playersData[gameState.myPlayerId] && (
+        {myPlayerData && (
           <PlayerPanel
-            playerName={`${gameState.playersData[gameState.myPlayerId]?.displayName || gameState.myPlayerId} (You)`}
+            playerName={`${myPlayerData.displayName || gameState.myPlayerId} (You)`}
             isCurrentPlayer={true}
             isPlayerTurn={gameState.currentTurnPlayerId === gameState.myPlayerId}
-            guesses={gameState.playersData[gameState.myPlayerId]?.guessesMade || []}
+            guesses={myPlayerData.guessesMade || []}
             onMakeGuess={handleMakeGuess}
             isSubmitting={isSubmittingGuess && gameState.currentTurnPlayerId === gameState.myPlayerId}
             secretForDisplay={gameState.mySecret} 
           />
         )}
-        {opponentId && gameState.playersData[opponentId] && (
+        {opponentPlayerData && opponentId && ( // ensure opponentId is also valid
           <PlayerPanel
-            playerName={gameState.playersData[opponentId]?.displayName || opponentId}
+            playerName={opponentPlayerData.displayName || opponentId}
             isCurrentPlayer={false}
             isPlayerTurn={gameState.currentTurnPlayerId === opponentId}
-            guesses={gameState.playersData[opponentId]?.guessesMade || []} 
+            guesses={opponentPlayerData.guessesMade || []} 
             onMakeGuess={() => {}} 
             isSubmitting={false} 
-            secretForDisplay={undefined} 
+            secretForDisplay={undefined} // Opponent's secret is never displayed here
           />
         )}
       </div>
@@ -319,4 +332,4 @@ export default function MultiplayerPlayPage() {
     </div>
   );
 }
-
+      
